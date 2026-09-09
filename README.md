@@ -1,6 +1,6 @@
 **1. Setup & Planning**
 
-Agree on a shared data representation (e.g., numeric cols first, categorical after, target last) \n
+Agree on a shared data representation (e.g., numeric cols first, categorical after, target last)  
 Agree on code structure/interfaces (e.g., every method implements the same predict(X_train, y_train, X_query) signature)
 Set up shared repo (GitHub) and decide task split between the two of you
 
