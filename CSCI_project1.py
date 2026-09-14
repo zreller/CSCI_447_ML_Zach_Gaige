@@ -97,67 +97,175 @@ def classification_null_model(y_train):
 def regression_null_model(y_train):
     return y_train.mean()
 
+
+def five_by_two_split(df, repeats=5):
+    splits = []
+    for _ in range(repeats):
+        shuffled_df = df.sample(frac=1).reset_index(drop=True)
+        split = len(shuffled_df) // 2
+        S1 = shuffled_df.iloc[:split]
+        S2 = shuffled_df.iloc[split:]
+
+        fold_A=(S1, S2)
+        fold_B=(S2, S1)
+        splits.append((fold_A, fold_B))
+    return splits
+
+
+
+def run_cv_for_dataset(df, target_col, numeric_cols, categorical_cols, methods, is_classification, repeats=5):
+    splits = five_by_two_split(df, repeats=repeats)
+    results = {name: [] for name in methods}
+
+    for fold_A, fold_B in splits:
+        for train_df, test_df in [fold_A, fold_B]:
+
+            vdm_tables = None
+            classes = None
+
+            if categorical_cols:
+                # Bug 2 fix: use 'col', not 'categorical_cols', as the cat_col argument
+                vdm_tables = [compute_vdm_tables(train_df, col, target_col) for col in categorical_cols]
+                classes = train_df[target_col].unique()
+            else:
+                # Bug 4 fix: use the train/test-aware normalizer, and actually keep the result
+                train_df, test_df = min_max_normalize_train_test(train_df, test_df, numeric_cols)
+
+            y_test = test_df[target_col]
+
+            for name, method_fn in methods.items():
+                # Bug 3 fix: pass vdm_tables/classes through so cat_dist-based methods can use them
+                y_pred = method_fn(train_df, test_df, target_col, vdm_tables=vdm_tables, classes=classes)
+
+                if is_classification:
+                    score = classification_error(y_test, y_pred)
+                else:
+                    score = mean_squared_error(y_test, y_pred)
+
+                results[name].append(score)
+
+    return results
+
+def run_null_regression(train_df, test_df, target_col, vdm_tables=None, classes=None):
+    pred_value = regression_null_model(train_df[target_col])
+    return [pred_value] * len(test_df)
+
+def run_null_classification(train_df, test_df, target_col, vdm_tables=None, classes=None):
+    pred_value = classification_null_model(train_df[target_col])
+    return [pred_value] * len(test_df)
+
+def run_knn_regression(train_df, test_df, target_col, feature_cols, k=5, gamma=1.0,
+                        distance_fn=minkowski_distance, p=2, vdm_tables=None, classes=None):
+    predictions = []
+    for _, query_row in test_df.iterrows():
+        pred = knn_regress_predict(train_df, query_row, feature_cols, target_col, k, gamma, distance_fn, p)
+        predictions.append(pred)
+    return predictions
+
+def run_knn_classification(train_df, test_df, target_col, feature_cols, k=5,
+                            distance_fn=cat_dist, p=2, vdm_tables=None, classes=None):
+    predictions = []
+    for _, query_row in test_df.iterrows():
+        pred = knn_classify_predict(train_df, query_row, feature_cols, target_col, k, distance_fn, p, vdm_tables, classes)
+        predictions.append(pred)
+    return predictions
+
+def knn_regress_predict(train_df, query_row, feature_cols, target_col, k, gamma, distance_fn, p=2):
+    distances = []
+    for _, train_row in train_df.iterrows():
+        x = np.array([train_row[c] for c in feature_cols])
+        y = np.array([query_row[c] for c in feature_cols])
+        d = distance_fn(x, y, p)
+        distances.append((d, train_row[target_col]))
+    distances.sort(key=lambda pair: pair[0])
+    nearest = distances[:k]
+    weights = [np.exp(-gamma * d**2) for d, _ in nearest]
+    values = [v for _, v in nearest]
+    if sum(weights) == 0:
+        return np.mean(values)
+    return sum(w * v for w, v in zip(weights, values)) / sum(weights)
+
+
+def knn_classify_predict(train_df, query_row, feature_cols, target_col, k, distance_fn, p=2, vdm_tables = None, classes = None):
+    distances = []
+    for _, train_row in train_df.iterrows():
+        x = [train_row[c] for c in feature_cols]
+        y = [query_row[c] for c in feature_cols]
+        if vdm_tables is not None:
+            d = distance_fn(x, y, vdm_tables, classes, p)
+        else:
+            d = distance_fn(np.array(x), np.array(y), p)
+        distances.append((d, train_row[target_col]))
+
+    distances.sort(key=lambda pair: pair[0])
+    nearest = distances[:k]
+    labels = [label for _, label in nearest]
+
+    counts = pd.Series(labels).value_counts()
+    top_classes = counts[counts == counts.max()].index.tolist()
+    return random.choice(top_classes)
+
+
+def knn_regress_predict(train_df, query_row, feature_cols, target_col, k, gamma, distance_fn, p=2):
+    distances = []
+    for _, train_row in train_df.iterrows():
+        x = np.array([train_row[c] for c in feature_cols])
+        y = np.array([query_row[c] for c in feature_cols])
+        d = distance_fn(x, y, p)
+        distances.append((d, train_row[target_col]))
+    distances.sort(key=lambda pair: pair[0])
+    nearest = distances[:k]
+    weights = [np.exp(-gamma * d**2) for d, _ in nearest]
+    values = [v for _, v in nearest]
+    if sum(weights) == 0:
+        return np.mean(values)
+    return sum(w * v for w, v in zip(weights, values)) / sum(weights)
+
+
+
 machine_cols = ['vendor_name', 'model_name', 'myct', 'mmin', 'mmax', 'cach', 'chmin', 'chmax', 'prp', 'erp']
+machine_numeric_cols = ['myct', 'mmin', 'mmax', 'cach', 'chmin', 'chmax']
 machine = pd.read_csv("machine.data", header=None, names=machine_cols)
 erp = machine['erp']
 machine = machine.drop(columns = ['vendor_name', 'model_name', 'erp'])
-print("machine data set")
-print(machine.head(10))
-machine_cols_norm = ['myct', 'mmin', 'mmax', 'cach', 'chmin', 'chmax']
-min_max_normalized_machine = min_max_normalize(machine, machine_cols_norm)
-print(min_max_normalized_machine.head(10))
-print("\n")
-machine_shuffled = machine.sample(frac=1, random_state=42).reset_index(drop=True)
+#print("machine data set")
 
-split_idx = int(len(machine_shuffled) * 0.8)
-y_train = machine_shuffled.iloc[:split_idx]['prp']
-y_test = machine_shuffled.iloc[split_idx:]['prp']
 
-pred_value = regression_null_model(y_train)
-y_pred = [pred_value] * len(y_test)
-error = mean_squared_error(y_test, y_pred)
-
-print("Predicted value:", pred_value)
-print("Machine null model MSE:", error)
-
-print("\n")
 abalone_cols= ['sex', 'length', 'diameter', 'height', 'whole_weight', 'shucked_weight', 'viscera_weight', 'shell_weight', 'rings']
 abalone = pd.read_csv("abalone.data", header=None, names=abalone_cols)
 abalone = pd.get_dummies(abalone, columns=['sex'])
 print("abalone data set")
 print(abalone.head(10))
 abalone_cols_norm = ['length', 'diameter', 'height', 'whole_weight', 'shucked_weight', 'viscera_weight', 'shell_weight']
+abalone_numeric_cols = ['length', 'diameter', 'height', 'whole_weight',
+                         'shucked_weight', 'viscera_weight', 'shell_weight'] + \
+                        [c for c in abalone.columns if c.startswith('sex_')]
 min_max_normalized_abalone = min_max_normalize(abalone, abalone_cols_norm)
-print(min_max_normalized_abalone.head(10))
-print("\n")
+#print(min_max_normalized_abalone.head(10))
 
 
 
 car_cols = ['buying', 'maint', 'doors', 'persons', 'lug_boot', 'safety', 'class']
-car_cat_cols = ['buying', 'maint', 'doors', 'persons', 'lug_boot', 'safety']
+car_categorical_cols = ['buying', 'maint', 'doors', 'persons', 'lug_boot', 'safety']
+
 
 car = pd.read_csv("car.data", header=None, names=car_cols)
-car_vdm_tables = [compute_vdm_tables(car, col, 'class') for col in car_cat_cols]
+#car_vdm_tables = [compute_vdm_tables(car, col, 'class') for col in car_cat_cols]
 classes = car['class'].unique()
 row1 = car.iloc[0]
 row2 = car.iloc[1]
-x_cat = [row1[col] for col in car_cat_cols]
-y_cat = [row2[col] for col in car_cat_cols]
-distance = cat_dist(x_cat, y_cat, car_vdm_tables, classes, p=1)
-print(distance)
-print(cat_dist(x_cat, x_cat, car_vdm_tables, classes, p=1))
-print("car data set")
-print(car.head(10))
-print("\n")
+#x_cat = [row1[col] for col in car_cat_cols]
+#y_cat = [row2[col] for col in car_cat_cols]
+#distance = cat_dist(x_cat, y_cat, car_vdm_tables, classes, p=1)
+#print(distance)
+#print(cat_dist(x_cat, x_cat, car_vdm_tables, classes, p=1))
+#y_train = car.iloc[:int(len(car)*0.8)]['class']
+#y_test = car.iloc[int(len(car)*0.8):]['class']
 
-y_train = car.iloc[:int(len(car)*0.8)]['class']
-y_test = car.iloc[int(len(car)*0.8):]['class']
-
-pred = classification_null_model(y_train)
-y_pred = [pred] * len(y_test)
-error = classification_error(y_test, y_pred)
-print("Car null model error:", error)
-print("\n")
+#pred = classification_null_model(y_train)
+#y_pred = [pred] * len(y_test)
+#error = classification_error(y_test, y_pred)
+#print("Car null model error:", error)
 
 cancer_cols = ['id', 'clump_thickness', 'cell_size_uniformity', 'cell_shape_uniformity',
                'marginal_adhesion', 'single_epithelial_cell_size', 'bare_nuclei',
@@ -166,14 +274,13 @@ cancer = pd.read_csv("breast-cancer-wisconsin.data", header = None, names = canc
 cancer = cancer.drop(columns=['id'])
 cancer = cancer[cancer['bare_nuclei'] != '?']
 cancer['bare_nuclei'] = cancer['bare_nuclei'].astype(int)
-print("cancer data set")
-print(cancer.head(10))
-cancer_cols_norm = ['clump_thickness', 'cell_size_uniformity', 'cell_shape_uniformity',
-                    'marginal_adhesion', 'single_epithelial_cell_size', 'bare_nuclei',
-                    'bland_chromatin', 'normal_nucleoli', 'mitoses']
-min_max_normalized_cancer = min_max_normalize(cancer, cancer_cols_norm)
-print(min_max_normalized_cancer.head(10))
-print("\n")
+
+#print(cancer.head(10))
+cancer_numeric_cols = ['clump_thickness', 'cell_size_uniformity', 'cell_shape_uniformity',
+                        'marginal_adhesion', 'single_epithelial_cell_size', 'bare_nuclei',
+                        'bland_chromatin', 'normal_nucleoli', 'mitoses']
+#print(min_max_normalized_cancer.head(10))
+
 
 month_order = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
 day_order = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
@@ -182,11 +289,11 @@ fires = pd.read_csv("forestfires.csv")
 fires['area'] = np.log1p(fires['area'])
 fires['month'] = fires['month'].apply(lambda x: month_order.index(x))
 fires['day'] = fires['day'].apply(lambda x: day_order.index(x))
-print("fires data set")
-print(fires.head(10))
+#print("fires data set")
+#print(fires.head(10))
 fires_cols_norm = ['X', 'Y', 'FFMC', 'DMC', 'DC', 'ISI', 'temp', 'RH', 'wind', 'rain']
 min_max_normalized_fires = min_max_normalize(fires, fires_cols_norm)
-print(min_max_normalized_fires.head(10))
+#print(min_max_normalized_fires.head(10))
 fires_cols = ['X', 'Y', 'month', 'day', 'FFMC', 'DMC', 'DC', 'ISI', 'temp', 'RH', 'wind', 'rain']
 cyclical_cols = ['month', 'day']
 cycle_lengths = {'month': 12, 'day': 7}
@@ -194,10 +301,63 @@ row1 = fires.iloc[0]
 row2 = fires.iloc[1]
 dist = fires_distance(row1, row2, fires_cols, cyclical_cols, cycle_lengths, p=2)
 print(dist)
-print("\n")
+fires_numeric_cols = ['X', 'Y', 'FFMC', 'DMC', 'DC', 'ISI', 'temp', 'RH', 'wind', 'rain']
+
+
     
 house_data = load_vote("house-votes-84.data")
 house_df = pd.DataFrame(house_data, columns=['party', 'handicapped-infants', 'water-project-cost-sharing', 'adoption-of-the-budget-resolution', 'physician-fee-freeze', 'el-salvador-aid', 'religious-groups-in-schools', 'anti-satellite-test-ban', 'aid-to-nicaraguan-contras', 'mx-missile', 'immigration', 'synfuels-corporation-cut', 'education-spending', 'superfund-right-to-sue', 'crime', 'duty-free-exports', 'export-administration-act-south-africa'])
-print("house data set")
-print(house_df.head(10))
+house_categorical_cols = ['handicapped-infants', 'water-project-cost-sharing',
+                           'adoption-of-the-budget-resolution', 'physician-fee-freeze',
+                           'el-salvador-aid', 'religious-groups-in-schools',
+                           'anti-satellite-test-ban', 'aid-to-nicaraguan-contras',
+                           'mx-missile', 'immigration', 'synfuels-corporation-cut',
+                           'education-spending', 'superfund-right-to-sue', 'crime',
+                           'duty-free-exports', 'export-administration-act-south-africa']
+#print(house_df.head(10))
+
+
+
+
+
+methods_regression = {
+    'null regression': run_null_regression,
+    'knn regression': lambda train, test, target, vdm_tables=None, classes=None: run_knn_regression(
+        train, test, target, feature_cols=machine_numeric_cols, k=5, gamma=1.0,
+        distance_fn=minkowski_distance, p=2
+    ),
+    # 'edited': run_edited_regression, <- add later
+}
+methods_classification = {
+    'null classification': run_null_classification,
+    'knn classification': lambda train, test, target, vdm_tables=None, classes=None: run_knn_classification(
+        train, test, target, feature_cols=car_categorical_cols, k=5,
+        distance_fn=cat_dist, p=1, vdm_tables=vdm_tables, classes=classes
+    )
+    # 'condensed': run_condensed_classification, <- add later
+}
+
+results_regression = run_cv_for_dataset(machine, 'prp', machine_numeric_cols, [], methods_regression,
+                              is_classification=False)
+print(results_regression)
+print("Null model average MSE:", np.mean(results_regression['null regression']))
+print("k-NN average MSE:", np.mean(results_regression['knn regression']))
+results_classification = run_cv_for_dataset(car, 'class', [], car_categorical_cols, methods_classification,
+                              is_classification=True)
+print(results_classification)
+
+#train_norm, test_norm = min_max_normalize_train_test(train_df, test_df, machine_numeric_cols)
+
+#print("Original training set size:", len(train_norm))
+#edited_train = edit_dataset_regression(train_norm, machine_numeric_cols, 'prp',
+     #                                   minkowski_distance, epsilon=50.0, p=2, gamma=1.0)
+#print("Edited training set size:", len(edited_train))
+
+"""y_pred_edited = run_knn_regression(edited_train, test_norm, 'prp', machine_numeric_cols, k=5, gamma=1.0)
+y_pred_plain = run_knn_regression(train_norm, test_norm, 'prp', machine_numeric_cols, k=5, gamma=1.0)
+y_true = test_norm['prp']
+
+print("Edited k-NN MSE:", mean_squared_error(y_true, y_pred_edited))
+print("Plain k-NN MSE:", mean_squared_error(y_true, y_pred_plain))"""
+
 
