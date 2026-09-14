@@ -3,6 +3,25 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+from knn import Features, KNNClassifier, KNNRegressor, CHUNK_SIZE
+from edited_condensed_knn import condensed_nn_classification, condensed_nn_regression, edited_nn_classification, edited_nn_regression
+ 
+
+
+def makefeatures(df, numeric_cols, categorical_cols, cyclical_cols=None, cyc_periods=None):
+    if cyclical_cols is None:
+        cyclical_cols = []
+
+    if cyc_periods is None:
+        cyc_periods = []
+
+    X_num = df[numeric_cols].to_numpy() if numeric_cols else np.empty((len(df), 0))
+
+    X_cat = df[categorical_cols].to_numpy() if categorical_cols else np.empty((len(df), 0), dtype=object)
+
+    X_cyc = df[cyclical_cols].to_numpy() if cyclical_cols else np.empty((len(df), 0))
+
+    return Features(X_num = X_num, X_cat = X_cat, X_cyc = X_cyc, cyc_periods = cyc_periods)
 
 def min_max_normalize(df, cols):
     df=df.copy()
@@ -71,11 +90,11 @@ def cyclical_distance(a, b, cycle_length):
     diff = abs(a - b)
     return min(diff, cycle_length - diff)
 
-def fires_distance(x, y, cols, cyclical_cols, cycle_lengths, p=2):
+def fires_distance(x, y, cols, cyclical_cols, cyc_periods, p=2):
     total = 0.0
     for col in cols:
         if col in cyclical_cols:
-            diff = cyclical_distance(x[col], y[col], cycle_lengths[col])
+            diff = cyclical_distance(x[col], y[col], cyc_periods[col])
         else:
             diff = abs(x[col] - y[col])
         total += diff ** p
@@ -98,10 +117,12 @@ def regression_null_model(y_train):
     return y_train.mean()
 
 
-def five_by_two_split(df, repeats=5):
+def five_by_two_split(df, repeats=5, random_state=42):
     splits = []
+    rng = np.random.default_rng(random_state)
     for _ in range(repeats):
-        shuffled_df = df.sample(frac=1).reset_index(drop=True)
+        indices = rng.permutation(len(df))
+        shuffled_df = df.iloc[indices].reset_index(drop=True)
         split = len(shuffled_df) // 2
         S1 = shuffled_df.iloc[:split]
         S2 = shuffled_df.iloc[split:]
@@ -113,8 +134,8 @@ def five_by_two_split(df, repeats=5):
 
 
 
-def run_cv_for_dataset(df, target_col, numeric_cols, categorical_cols, methods, is_classification, repeats=5):
-    splits = five_by_two_split(df, repeats=repeats)
+def run_cv_for_dataset(df, target_col, numeric_cols, categorical_cols, methods, is_classification, repeats=5, cyclical_cols=None, cyc_periods=None):
+    splits = five_by_two_split(df, repeats=5, random_state=42)
     results = {name: [] for name in methods}
 
     for fold_A, fold_B in splits:
@@ -135,7 +156,7 @@ def run_cv_for_dataset(df, target_col, numeric_cols, categorical_cols, methods, 
 
             for name, method_fn in methods.items():
                 # Bug 3 fix: pass vdm_tables/classes through so cat_dist-based methods can use them
-                y_pred = method_fn(train_df, test_df, target_col, vdm_tables=vdm_tables, classes=classes)
+                y_pred = method_fn(train_df, test_df, target_col, numeric_cols, categorical_cols)
 
                 if is_classification:
                     score = classification_error(y_test, y_pred)
@@ -154,59 +175,74 @@ def run_null_classification(train_df, test_df, target_col, vdm_tables=None, clas
     pred_value = classification_null_model(train_df[target_col])
     return [pred_value] * len(test_df)
 
-def run_knn_regression(train_df, test_df, target_col, feature_cols, k=5, gamma=1.0,
-                        distance_fn=minkowski_distance, p=2, vdm_tables=None, classes=None):
-    predictions = []
-    for _, query_row in test_df.iterrows():
-        pred = knn_regress_predict(train_df, query_row, feature_cols, target_col, k, gamma, distance_fn, p)
-        predictions.append(pred)
+def run_knn_regression(train_df, test_df, target_col, numeric_cols, categorical_cols, cyclical_cols=None, cyc_periods=None, k = 5, gamma=1.0, p=2):
+    train_feats = makefeatures(train_df, numeric_cols, categorical_cols, cyclical_cols, cyc_periods)
+    test_feats = makefeatures(test_df, numeric_cols, categorical_cols, cyclical_cols, cyc_periods)
+    model = KNNRegressor(k=k, p=p, gamma=gamma)
+    model.fit(train_feats, train_df[target_col].to_numpy())
+    return model.predict(test_feats)
+
+def run_knn_classification(train_df, test_df, target_col, numeric_cols, categorical_cols, cyclical_cols=None, cyc_periods=None, k=5, p=2, random_state=None):
+    train_feats = makefeatures(train_df, numeric_cols, categorical_cols, cyclical_cols, cyc_periods)
+    test_feats = makefeatures(test_df, numeric_cols, categorical_cols, cyclical_cols, cyc_periods)
+    model = KNNClassifier(k=k, p=p, random_state=random_state)
+    model.fit(train_feats, train_df[target_col].to_numpy())
+    return model.predict(test_feats)
+
+def run_edited_regression(train_df, test_df, target_col, numeric_cols, categorical_cols, epsilon = 0.1, k=5, p=2, max_iters=50, random_state=None):
+    train_feats = makefeatures(train_df, numeric_cols, categorical_cols, [], [])
+    test_feats = makefeatures(test_df, numeric_cols, categorical_cols, [], [])
+    y_train = train_df[target_col].to_numpy()
+
+    reduced_feats, reduced_y, keep = edited_nn_regression(train_feats, y_train, epsilon=epsilon, p=p, max_iters=max_iters, random_state=random_state)
+
+    knn=KNNRegressor(k=k, p=p, random_state=random_state)
+    knn.fit(reduced_feats, reduced_y)
+
+    predictions = knn.predict(test_feats)
     return predictions
 
-def run_knn_classification(train_df, test_df, target_col, feature_cols, k=5,
-                            distance_fn=cat_dist, p=2, vdm_tables=None, classes=None):
-    predictions = []
-    for _, query_row in test_df.iterrows():
-        pred = knn_classify_predict(train_df, query_row, feature_cols, target_col, k, distance_fn, p, vdm_tables, classes)
-        predictions.append(pred)
+def run_edited_classification(train_df, test_df, target_col, numeric_cols, categorical_cols, epsilon=0.1, k=5, p=2, max_iters=50, random_state=None):
+    train_feats = makefeatures(train_df, numeric_cols, categorical_cols, [], [])
+    test_feats = makefeatures(test_df, numeric_cols, categorical_cols, [], [])
+    y_train = train_df[target_col].to_numpy()
+
+    reduced_feats, reduced_y, keep = edited_nn_classification(train_feats, y_train, p=p, max_iters=max_iters, random_state=random_state)
+
+    knn=KNNClassifier(k=k, p=p, random_state=random_state)
+    knn.fit(reduced_feats, reduced_y)
+
+    predictions = knn.predict(test_feats)
     return predictions
 
-def knn_regress_predict(train_df, query_row, feature_cols, target_col, k, gamma, distance_fn, p=2):
-    distances = []
-    for _, train_row in train_df.iterrows():
-        x = np.array([train_row[c] for c in feature_cols])
-        y = np.array([query_row[c] for c in feature_cols])
-        d = distance_fn(x, y, p)
-        distances.append((d, train_row[target_col]))
-    distances.sort(key=lambda pair: pair[0])
-    nearest = distances[:k]
-    weights = [np.exp(-gamma * d**2) for d, _ in nearest]
-    values = [v for _, v in nearest]
-    if sum(weights) == 0:
-        return np.mean(values)
-    return sum(w * v for w, v in zip(weights, values)) / sum(weights)
+def run_condensed_regression(train_df, test_df, target_col, numeric_cols, categorical_cols, epsilon=0.1, k=5, p=2, gamma=1.0, max_iters=50, random_state=None):
+    train_feats = makefeatures(train_df, numeric_cols, categorical_cols, [], [])
+    test_feats = makefeatures(test_df, numeric_cols, categorical_cols, [], [])
+    y_train = train_df[target_col].to_numpy()
+
+    reduced_feats, reduced_y, keep = condensed_nn_regression(train_feats, y_train, epsilon=epsilon, p=p, max_iters=max_iters, random_state=random_state)
+
+    knn=KNNRegressor(k=k, p=p, gamma=gamma, random_state=random_state)
+    knn.fit(reduced_feats, reduced_y)
+
+    predictions = knn.predict(test_feats)
+    return predictions
+
+def run_condensed_classification(train_df, test_df, target_col, numeric_cols, categorical_cols, k=5, p=2, max_iters=50, random_state=None):
+    train_feats = makefeatures(train_df, numeric_cols, categorical_cols, [], [])
+    test_feats = makefeatures(test_df, numeric_cols, categorical_cols, [], [])
+    y_train = train_df[target_col].to_numpy()
+
+    reduced_feats, reduced_y, keep = condensed_nn_classification(train_feats, y_train, p=p, max_iters=max_iters, random_state=random_state)
+
+    knn=KNNClassifier(k=k, p=p, random_state=random_state)
+    knn.fit(reduced_feats, reduced_y)
+
+    predictions = knn.predict(test_feats)
+    return predictions
 
 
-def knn_classify_predict(train_df, query_row, feature_cols, target_col, k, distance_fn, p=2, vdm_tables = None, classes = None):
-    distances = []
-    for _, train_row in train_df.iterrows():
-        x = [train_row[c] for c in feature_cols]
-        y = [query_row[c] for c in feature_cols]
-        if vdm_tables is not None:
-            d = distance_fn(x, y, vdm_tables, classes, p)
-        else:
-            d = distance_fn(np.array(x), np.array(y), p)
-        distances.append((d, train_row[target_col]))
-
-    distances.sort(key=lambda pair: pair[0])
-    nearest = distances[:k]
-    labels = [label for _, label in nearest]
-
-    counts = pd.Series(labels).value_counts()
-    top_classes = counts[counts == counts.max()].index.tolist()
-    return random.choice(top_classes)
-
-
-def knn_regress_predict(train_df, query_row, feature_cols, target_col, k, gamma, distance_fn, p=2):
+def knn_regress_predict(train_df, query_row, feature_cols, target_col, k, distance_fn, p=2):
     distances = []
     for _, train_row in train_df.iterrows():
         x = np.array([train_row[c] for c in feature_cols])
@@ -322,20 +358,29 @@ house_categorical_cols = ['handicapped-infants', 'water-project-cost-sharing',
 
 methods_regression = {
     'null regression': run_null_regression,
-    'knn regression': lambda train, test, target, vdm_tables=None, classes=None: run_knn_regression(
-        train, test, target, feature_cols=machine_numeric_cols, k=5, gamma=1.0,
-        distance_fn=minkowski_distance, p=2
+    'knn regression': lambda train, test, target, numeric_cols, categorical_cols, cyclical_cols=None, cycle_lengths=None: run_knn_regression(
+        train, test, target, numeric_cols = numeric_cols, categorical_cols = categorical_cols, k=5, gamma=1.0, p=2
     ),
-    # 'edited': run_edited_regression, <- add later
+    'edited regression': lambda train, test, target, numeric_cols, categorical_cols, cyclical_cols=None, cycle_lengths=None, random_state=None: run_edited_regression(
+        train, test, target, numeric_cols = numeric_cols, categorical_cols = categorical_cols, epsilon=0.1, k=5, p=2, max_iters=50, random_state=random_state
+    ),
+    'condensed regression': lambda train, test, target, numeric_cols, categorical_cols, cyclical_cols=None, cycle_lengths=None, random_state=None: run_condensed_regression(
+        train, test, target, numeric_cols = numeric_cols, categorical_cols = categorical_cols, k=5, p=2, gamma=1.0, max_iters=50, random_state=random_state
+    ),
 }
 methods_classification = {
     'null classification': run_null_classification,
-    'knn classification': lambda train, test, target, vdm_tables=None, classes=None: run_knn_classification(
-        train, test, target, feature_cols=car_categorical_cols, k=5,
-        distance_fn=cat_dist, p=1, vdm_tables=vdm_tables, classes=classes
+    'knn classification': lambda train, test, target, numeric_cols, categorical_cols, cyclical_cols=None, cycle_lengths=None: run_knn_classification(
+        train, test, target, numeric_cols=numeric_cols, categorical_cols=categorical_cols, k=5, p=1
+    ),
+    'edited classification': lambda train, test, target, numeric_cols, categorical_cols, cyclical_cols=None, cycle_lengths=None, random_state=None: run_edited_classification(
+        train, test, target, numeric_cols = numeric_cols, categorical_cols = categorical_cols, epsilon=0.1, k=5, p=2, max_iters=50, random_state=random_state
+    ),
+    'condensed classification': lambda train, test, target, numeric_cols, categorical_cols, cyclical_cols=None, cycle_lengths=None, random_state=None: run_condensed_classification(
+        train, test, target, numeric_cols = numeric_cols, categorical_cols = categorical_cols, k=5, p=2, max_iters=50, random_state=random_state
     )
-    # 'condensed': run_condensed_classification, <- add later
 }
+
 
 results_regression = run_cv_for_dataset(machine, 'prp', machine_numeric_cols, [], methods_regression,
                               is_classification=False)
