@@ -1,32 +1,31 @@
+
 import os
 import numpy as np
 import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from scipy import stats
 
-from knn_full import (
-    min_max_normalize_train_test, load_vote, compute_vdm_tables,
-    classification_error, mean_squared_error,
-    classification_null_model, regression_null_model,
-    pairwise_numeric, pairwise_fires,
-    knn_classify, knn_regress,
+from knn import Features, KNNClassifier, KNNRegressor
+from edited_condensed_knn import (
     edited_nn_classification, edited_nn_regression,
-    k_fold_split, tune_knn_regression_numeric, tune_knn_regression_fires,
-    tune_k_numeric_classification,
-    five_by_two_split, dietterich_5x2cv_ttest,
-    RANDOM_STATE,
+    condensed_nn_classification, condensed_nn_regression,
 )
+from Hyperparameter import tune_hyperparameters, classification_error, mean_squared_error
 
+RANDOM_STATE = 42
 np.random.seed(RANDOM_STATE)
 OUT_DIR = os.path.dirname(os.path.abspath(__file__)) or "."
 EPSILON_FRACTION = 0.25  
+
+# Palette / chart styling
 
 C_BLUE, C_ORANGE, C_AQUA, C_YELLOW = "#2a78d6", "#eb6834", "#1baf7a", "#eda100"
 C_MAGENTA, C_GREEN, C_VIOLET, C_RED = "#e87ba4", "#008300", "#4a3aa7", "#e34948"
 C_GRAY = "#898781"
 INK, INK2, GRID, SURFACE = "#0b0b0b", "#52514e", "#e1e0d9", "#fcfcfb"
-GAMMA_COLORS = [C_AQUA, C_YELLOW, C_VIOLET, C_RED]  
+GAMMA_COLORS = [C_AQUA, C_YELLOW, C_VIOLET, C_RED]  # fixed order, distinct from method colors
 
 
 def style_axes(ax, title=None, xlabel=None, ylabel=None):
@@ -45,220 +44,317 @@ def style_axes(ax, title=None, xlabel=None, ylabel=None):
     if ylabel:
         ax.set_ylabel(ylabel, color=INK2, fontsize=9)
 
+# Small helpers
 
-def pairwise_categorical(A_cat, B_cat, vdm_tables, classes, p=1):
-    A_cat = np.asarray(A_cat, dtype=object)
-    B_cat = np.asarray(B_cat, dtype=object)
-    classes = list(classes)
-    fallback = np.full(len(classes), 1.0 / len(classes))
-    total = np.zeros((len(A_cat), len(B_cat)))
-    for j in range(A_cat.shape[1]):
-        table = vdm_tables[j]
-
-        def probs_for(vals):
-            out = np.empty((len(vals), len(classes)))
-            for i, v in enumerate(vals):
-                if v in table:
-                    Ci, Ci_a = table[v]["Ci"], table[v]["Ci_a"]
-                    out[i] = [Ci_a[c] / Ci for c in classes]
-                else:
-                    out[i] = fallback
-            return out
-
-        Pa, Pb = probs_for(A_cat[:, j]), probs_for(B_cat[:, j])
-        total += np.sum(np.abs(Pa[:, None, :] - Pb[None, :, :]) ** p, axis=2)
-    return total ** (1.0 / p)
+def makefeatures(df, numeric_cols, categorical_cols, cyclical_cols=None, cyc_periods=None):
+    if cyclical_cols is None:
+        cyclical_cols = []
+    if cyc_periods is None:
+        cyc_periods = []
+    X_num = df[numeric_cols].to_numpy(dtype=float) if numeric_cols else np.empty((len(df), 0))
+    X_cat = df[categorical_cols].to_numpy() if categorical_cols else np.empty((len(df), 0), dtype=object)
+    X_cyc = df[cyclical_cols].to_numpy(dtype=float) if cyclical_cols else np.empty((len(df), 0))
+    return Features(X_num=X_num, X_cat=X_cat, X_cyc=X_cyc, cyc_periods=cyc_periods)
 
 
-def tune_k_categorical_classification(train_df, cat_cols, class_col, k_grid, p=1,
-                                       inner_k=5, random_state=None):
-    """Same job as knn_full.py's tuner of the same name, but built on the
-    fast pairwise_categorical above instead of the slow one."""
-    n = len(train_df)
-    results = []
-    for k in k_grid:
-        fold_errors = []
-        for tr_idx, val_idx in k_fold_split(n, inner_k, random_state=random_state):
-            tr_df, val_df = train_df.iloc[tr_idx], train_df.iloc[val_idx]
-            vdm_tables = [compute_vdm_tables(tr_df, col, class_col) for col in cat_cols]
-            classes = tr_df[class_col].unique()
-            D = pairwise_categorical(val_df[cat_cols].values.tolist(),
-                                      tr_df[cat_cols].values.tolist(), vdm_tables, classes, p=p)
-            preds = knn_classify(D, tr_df[class_col].values, k)
-            fold_errors.append(classification_error(preds, val_df[class_col].values))
-        results.append((k, float(np.mean(fold_errors))))
-    results.sort(key=lambda t: t[1])
-    return results[0][0], results[0][1], results
+def min_max_normalize_train_test(train_df, test_df, cols):
+    train_df = train_df.copy()
+    test_df = test_df.copy()
+    for col in cols:
+        min_val = train_df[col].min()
+        max_val = train_df[col].max()
+        rng = max_val - min_val if max_val != min_val else 1.0
+        train_df[col] = (train_df[col] - min_val) / rng
+        test_df[col] = (test_df[col] - min_val) / rng
+    return train_df, test_df
 
-# Per-dataset-shape analysis runners
 
-def run_numeric_classification(name, df, feature_cols, class_col, k_grid, inner_k=5):
+def load_vote(file_path):
+    house = []
+    with open(file_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            fields = line.split(",")
+            fields = ["abstain" if val == "?" else val for val in fields]
+            house.append(fields)
+    return house
+
+
+def classification_null_model(y_train):
+    import random
+    counts = y_train.value_counts()
+    tied_classes = counts[counts == counts.max()].index.tolist()
+    return random.choice(tied_classes)
+
+
+def regression_null_model(y_train):
+    return y_train.mean()
+
+
+def five_by_two_split(n, random_state=None):
+    """Outer 5x2cv split generator (Dietterich 1998): 5 repetitions, each
+    splitting n rows into two equal-ish random halves, each used as the
+    test set once. Returns 5 ((train_idx, test_idx), (train_idx, test_idx))
+    pairs, i.e. 10 folds total, grouped by repetition."""
+    rng = np.random.default_rng(random_state)
+    reps = []
+    for _ in range(5):
+        idx = rng.permutation(n)
+        half = n // 2
+        a, b = idx[:half], idx[half:]
+        reps.append(((a, b), (b, a)))
+    return reps
+
+
+def dietterich_5x2cv_ttest(scores_a, scores_b):
+    """Paired t-test for 5x2cv (Dietterich 1998). scores_a/scores_b must
+    each be a (5, 2) array from the SAME splits. Returns (t_stat, p_value, dof)."""
+    scores_a = np.asarray(scores_a, dtype=float)
+    scores_b = np.asarray(scores_b, dtype=float)
+    p = scores_a - scores_b
+    p_bar = p.mean(axis=1)
+    s2 = (p[:, 0] - p_bar) ** 2 + (p[:, 1] - p_bar) ** 2
+    denom = np.sqrt(np.mean(s2))
+    t_stat = 0.0 if denom == 0 else p[0, 0] / denom
+    dof = 5
+    p_value = 2 * stats.t.sf(np.abs(t_stat), dof)
+    return float(t_stat), float(p_value), dof
+
+
+def knn_classifier_factory(k, p):
+    def fit_predict(train_feats, train_y, val_feats):
+        model = KNNClassifier(k=k, p=p)
+        model.fit(train_feats, train_y)
+        return model.predict(val_feats)
+    return fit_predict
+
+
+def knn_regressor_factory(k, p, gamma):
+    def fit_predict(train_feats, train_y, val_feats):
+        model = KNNRegressor(k=k, p=p, gamma=gamma)
+        model.fit(train_feats, train_y)
+        return model.predict(val_feats)
+    return fit_predict
+
+# Per-dataset-shape runners: 5x2cv over Null / KNN / Edited-KNN / Condensed-KNN
+
+def run_numeric_classification(name, df, feature_cols, class_col, k_grid, p_grid=(1, 2), inner_k=5):
     n = len(df)
-    split_idx = int(n * 0.8)
-    best_k, _, tuning_results = tune_k_numeric_classification(
-        df.iloc[:split_idx].copy(), feature_cols, class_col, k_grid,
-        p=2, inner_k=inner_k, random_state=RANDOM_STATE)
-
     splits = five_by_two_split(n, random_state=RANDOM_STATE)
-    null_s, knn_s, ed_s = np.zeros((5, 2)), np.zeros((5, 2)), np.zeros((5, 2))
-    kept_fracs, cond_fracs = []
+    null_s, knn_s, ed_s, cond_s = np.zeros((5, 2)), np.zeros((5, 2)), np.zeros((5, 2)), np.zeros((5, 2))
+    ed_fracs, cond_fracs = [], []
+    tuning_results, best_params_used = None, None
+
     for rep, (fold_a, fold_b) in enumerate(splits):
         for fi, (tr_idx, te_idx) in enumerate([fold_a, fold_b]):
             tr_df, te_df = df.iloc[tr_idx].copy(), df.iloc[te_idx].copy()
             tr_df, te_df = min_max_normalize_train_test(tr_df, te_df, feature_cols)
+            tr_y, te_y = tr_df[class_col].to_numpy(), te_df[class_col].to_numpy()
 
             null_pred = classification_null_model(tr_df[class_col])
-            null_s[rep, fi] = classification_error([null_pred] * len(te_df), te_df[class_col].values)
+            null_s[rep, fi] = classification_error(te_y, np.array([null_pred] * len(te_y)))
 
-            D_test = pairwise_numeric(te_df[feature_cols].values, tr_df[feature_cols].values, p=2)
-            knn_s[rep, fi] = classification_error(
-                knn_classify(D_test, tr_df[class_col].values, best_k), te_df[class_col].values)
+            train_feats = makefeatures(tr_df, feature_cols, [])
+            test_feats = makefeatures(te_df, feature_cols, [])
 
-            D_tt = pairwise_numeric(tr_df[feature_cols].values, tr_df[feature_cols].values, p=2)
-            keep = edited_nn_classification(D_tt, tr_df[class_col].values, random_state=0)
-            kept_fracs.append(keep.mean())
-            D_test_ed = pairwise_numeric(te_df[feature_cols].values, tr_df[feature_cols].values[keep], p=2)
-            ed_s[rep, fi] = classification_error(
+            param_grid = {"k": list(k_grid), "p": list(p_grid)}
+            best_params, _, this_tuning = tune_hyperparameters(
+                knn_classifier_factory, train_feats, tr_y, param_grid,
+                metric=classification_error, lower_is_better=True,
+                inner_k=inner_k, random_state=RANDOM_STATE)
+            if tuning_results is None:
+                tuning_results = sorted((p["k"], s) for p, s in this_tuning if p["p"] == best_params["p"])
+                best_params_used = best_params
 
-            cond_keep = condensed_nn_classification(D_tt, tr_y, random_state=0)
+            knn_model = KNNClassifier(k=best_params["k"], p=best_params["p"])
+            knn_model.fit(train_feats, tr_y)
+            knn_s[rep, fi] = classification_error(te_y, knn_model.predict(test_feats))
+
+            ed_feats, ed_y, ed_keep = edited_nn_classification(train_feats, tr_y, p=best_params["p"], random_state=0)
+            ed_fracs.append(ed_keep.mean())
+            ed_model = KNNClassifier(k=best_params["k"], p=best_params["p"])
+            ed_model.fit(ed_feats, ed_y)
+            ed_s[rep, fi] = classification_error(te_y, ed_model.predict(test_feats))
+
+            cond_feats, cond_y, cond_keep = condensed_nn_classification(train_feats, tr_y, p=best_params["p"], random_state=0)
             cond_fracs.append(cond_keep.mean())
-            cond_s[rep, fi] = classification_error(
-                knn_classify(D_test[:, cond_keep], tr_y[cond_keep], best_k), te_y)
-            
-    return _package_result(name, "classification", {"k": best_k}, tuning_results,
-                            null_s, knn_s, ed_s, kept_fracs, ed
-                          -s, cond_s, ed_fracs. cond_fracs)
+            cond_model = KNNClassifier(k=best_params["k"], p=best_params["p"])
+            cond_model.fit(cond_feats, cond_y)
+            cond_s[rep, fi] = classification_error(te_y, cond_model.predict(test_feats))
+
+    return _package_result(name, "classification", best_params_used, tuning_results,
+                            null_s, knn_s, ed_s, cond_s, ed_fracs, cond_fracs)
 
 
-def run_categorical_classification(name, df, cat_cols, class_col, k_grid, inner_k=5):
+def run_categorical_classification(name, df, cat_cols, class_col, k_grid, p_grid=(1, 2), inner_k=5):
     n = len(df)
-    split_idx = int(n * 0.8)
-    best_k, _, tuning_results = tune_k_categorical_classification(
-        df.iloc[:split_idx], cat_cols, class_col, k_grid, p=1, inner_k=inner_k, random_state=RANDOM_STATE)
-
     splits = five_by_two_split(n, random_state=RANDOM_STATE)
-    null_s, knn_s, ed_s, cond_s = np.zeros((5, 2)), np.zeros((5, 2)), np.zeros((5, 2))
-    kept_fracs, cond_fracs = []
+    null_s, knn_s, ed_s, cond_s = np.zeros((5, 2)), np.zeros((5, 2)), np.zeros((5, 2)), np.zeros((5, 2))
+    ed_fracs, cond_fracs = [], []
+    tuning_results, best_params_used = None, None
+
     for rep, (fold_a, fold_b) in enumerate(splits):
         for fi, (tr_idx, te_idx) in enumerate([fold_a, fold_b]):
-            tr_df, te_df = df.iloc[tr_idx], df.iloc[te_idx]
-            vdm_tables = [compute_vdm_tables(tr_df, col, class_col) for col in cat_cols]
-            classes = tr_df[class_col].unique()
-            X_tr, X_te = tr_df[cat_cols].values.tolist(), te_df[cat_cols].values.tolist()
+            tr_df, te_df = df.iloc[tr_idx].copy(), df.iloc[te_idx].copy()
+            tr_y, te_y = tr_df[class_col].to_numpy(), te_df[class_col].to_numpy()
 
             null_pred = classification_null_model(tr_df[class_col])
-            null_s[rep, fi] = classification_error([null_pred] * len(te_df), te_df[class_col].values)
+            null_s[rep, fi] = classification_error(te_y, np.array([null_pred] * len(te_y)))
 
-            D_test = pairwise_categorical(X_te, X_tr, vdm_tables, classes, p=1)
-            knn_s[rep, fi] = classification_error(
-                knn_classify(D_test, tr_df[class_col].values, best_k), te_df[class_col].values)
+            train_feats = makefeatures(tr_df, [], cat_cols)
+            test_feats = makefeatures(te_df, [], cat_cols)
 
-            D_tt = pairwise_categorical(X_tr, X_tr, vdm_tables, classes, p=1)
-            keep = edited_nn_classification(D_tt, tr_df[class_col].values, random_state=0)
-            kept_fracs.append(keep.mean())
-            X_tr_keep = [x for x, m in zip(X_tr, keep) if m]
-            D_test_ed = pairwise_categorical(X_te, X_tr_keep, vdm_tables, classes, p=1)
-            ed_s[rep, fi] = classification_error(
+            param_grid = {"k": list(k_grid), "p": list(p_grid)}
+            best_params, _, this_tuning = tune_hyperparameters(
+                knn_classifier_factory, train_feats, tr_y, param_grid,
+                metric=classification_error, lower_is_better=True,
+                inner_k=inner_k, random_state=RANDOM_STATE)
+            if tuning_results is None:
+                tuning_results = sorted((p["k"], s) for p, s in this_tuning if p["p"] == best_params["p"])
+                best_params_used = best_params
 
-            cond_keep = condensed_nn_classification(D_tt, tr_y, random_state=0)
+            knn_model = KNNClassifier(k=best_params["k"], p=best_params["p"])
+            knn_model.fit(train_feats, tr_y)
+            knn_s[rep, fi] = classification_error(te_y, knn_model.predict(test_feats))
+
+            ed_feats, ed_y, ed_keep = edited_nn_classification(train_feats, tr_y, p=best_params["p"], random_state=0)
+            ed_fracs.append(ed_keep.mean())
+            ed_model = KNNClassifier(k=best_params["k"], p=best_params["p"])
+            ed_model.fit(ed_feats, ed_y)
+            ed_s[rep, fi] = classification_error(te_y, ed_model.predict(test_feats))
+
+            cond_feats, cond_y, cond_keep = condensed_nn_classification(train_feats, tr_y, p=best_params["p"], random_state=0)
             cond_fracs.append(cond_keep.mean())
-            cond_s[rep, fi] = classification_error(
-                knn_classify(D_test[:, cond_keep], tr_y[cond_keep], best_k), te_y)
+            cond_model = KNNClassifier(k=best_params["k"], p=best_params["p"])
+            cond_model.fit(cond_feats, cond_y)
+            cond_s[rep, fi] = classification_error(te_y, cond_model.predict(test_feats))
 
-    return _package_result(name, "classification", {"k": best_k}, tuning_results,
-                            null_s, knn_s, ed_s, kept_fracs, cond_s,ed_fracs, cond_fracs)
+    return _package_result(name, "classification", best_params_used, tuning_results,
+                            null_s, knn_s, ed_s, cond_s, ed_fracs, cond_fracs)
 
 
-def run_numeric_regression(name, df, feature_cols, target_col, k_grid, gamma_grid, inner_k=5):
+def run_numeric_regression(name, df, feature_cols, target_col, k_grid, gamma_grid, p_grid=(2,), inner_k=5):
     n = len(df)
-    split_idx = int(n * 0.8)
-    best_params, _, tuning_results = tune_knn_regression_numeric(
-        df.iloc[:split_idx].copy(), feature_cols, target_col, k_grid, gamma_grid,
-        p=2, inner_k=inner_k, random_state=RANDOM_STATE)
-    best_k, best_gamma = best_params["k"], best_params["gamma"]
-
     splits = five_by_two_split(n, random_state=RANDOM_STATE)
-    null_s, knn_s, ed_s, cond_s = np.zeros((5, 2)), np.zeros((5, 2)), np.zeros((5, 2))
-    kept_fracs, cond_fracs = []
+    null_s, knn_s, ed_s, cond_s = np.zeros((5, 2)), np.zeros((5, 2)), np.zeros((5, 2)), np.zeros((5, 2))
+    ed_fracs, cond_fracs = [], []
+    tuning_results, best_params_used = None, None
+
     for rep, (fold_a, fold_b) in enumerate(splits):
         for fi, (tr_idx, te_idx) in enumerate([fold_a, fold_b]):
             tr_df, te_df = df.iloc[tr_idx].copy(), df.iloc[te_idx].copy()
             tr_df, te_df = min_max_normalize_train_test(tr_df, te_df, feature_cols)
+            tr_y, te_y = tr_df[target_col].to_numpy(dtype=float), te_df[target_col].to_numpy(dtype=float)
 
             null_pred = regression_null_model(tr_df[target_col])
-            null_s[rep, fi] = mean_squared_error([null_pred] * len(te_df), te_df[target_col].values)
+            null_s[rep, fi] = mean_squared_error(te_y, np.full(len(te_y), null_pred))
 
-            D_test = pairwise_numeric(te_df[feature_cols].values, tr_df[feature_cols].values, p=2)
-            knn_s[rep, fi] = mean_squared_error(
-                knn_regress(D_test, tr_df[target_col].values, best_k, best_gamma), te_df[target_col].values)
+            train_feats = makefeatures(tr_df, feature_cols, [])
+            test_feats = makefeatures(te_df, feature_cols, [])
 
-            epsilon = EPSILON_FRACTION * np.std(tr_df[target_col].values)
-            D_tt = pairwise_numeric(tr_df[feature_cols].values, tr_df[feature_cols].values, p=2)
-            keep = edited_nn_regression(D_tt, tr_df[target_col].values, epsilon=epsilon)
-            kept_fracs.append(keep.mean())
-            D_test_ed = pairwise_numeric(te_df[feature_cols].values, tr_df[feature_cols].values[keep], p=2)
-            ed_s[rep, fi] = mean_squared_error(
+            param_grid = {"k": list(k_grid), "p": list(p_grid), "gamma": list(gamma_grid)}
+            best_params, _, this_tuning = tune_hyperparameters(
+                knn_regressor_factory, train_feats, tr_y, param_grid,
+                metric=mean_squared_error, lower_is_better=True,
+                inner_k=inner_k, random_state=RANDOM_STATE)
+            if tuning_results is None:
+                tuning_results = this_tuning
+                best_params_used = best_params
 
-            
-            cond_keep = condensed_nn_regression(D_tt, tr_y, epsilon=epsilon, random_state=0)
+            knn_model = KNNRegressor(k=best_params["k"], p=best_params["p"], gamma=best_params["gamma"])
+            knn_model.fit(train_feats, tr_y)
+            knn_s[rep, fi] = mean_squared_error(te_y, knn_model.predict(test_feats))
+
+            epsilon = EPSILON_FRACTION * np.std(tr_y)
+
+            ed_feats, ed_y, ed_keep = edited_nn_regression(
+                train_feats, tr_y, epsilon=epsilon, p=best_params["p"], gamma=best_params["gamma"], random_state=0)
+            ed_fracs.append(ed_keep.mean())
+            ed_model = KNNRegressor(k=best_params["k"], p=best_params["p"], gamma=best_params["gamma"])
+            ed_model.fit(ed_feats, ed_y)
+            ed_s[rep, fi] = mean_squared_error(te_y, ed_model.predict(test_feats))
+
+            cond_feats, cond_y, cond_keep = condensed_nn_regression(
+                train_feats, tr_y, epsilon=epsilon, p=best_params["p"], gamma=best_params["gamma"], random_state=0)
             cond_fracs.append(cond_keep.mean())
-            cond_s[rep, fi] = mean_squared_error(
-                knn_regress(D_test_ed, tr_df[target_col].values[keep], best_k, best_gamma), te_df[target_col].values)
+            cond_model = KNNRegressor(k=best_params["k"], p=best_params["p"], gamma=best_params["gamma"])
+            cond_model.fit(cond_feats, cond_y)
+            cond_s[rep, fi] = mean_squared_error(te_y, cond_model.predict(test_feats))
 
-    return _package_result(name, "regression", best_params, tuning_results, null_s, knn_s, ed_s, kept_fracs, cond_s, ed_fracs, cond_fracs)
+    return _package_result(name, "regression", best_params_used, tuning_results,
+                            null_s, knn_s, ed_s, cond_s, ed_fracs, cond_fracs)
 
 
 def run_fires_regression(name, df, cols, cyclical_cols, cycle_lengths, norm_cols, target_col,
-                          k_grid, gamma_grid, inner_k=5):
-    n = len(df)
-    split_idx = int(n * 0.8)
-    best_params, _, tuning_results = tune_knn_regression_fires(
-        df.iloc[:split_idx].copy(), cols, cyclical_cols, cycle_lengths, norm_cols, target_col,
-        k_grid, gamma_grid, p=2, inner_k=inner_k, random_state=RANDOM_STATE)
-    best_k, best_gamma = best_params["k"], best_params["gamma"]
+                          k_grid, gamma_grid, p_grid=(2,), inner_k=5):
+    cyc_periods = [cycle_lengths[c] for c in cyclical_cols]
+    plain_cols = [c for c in cols if c not in cyclical_cols]
 
+    n = len(df)
     splits = five_by_two_split(n, random_state=RANDOM_STATE)
-    null_s, knn_s, ed_s, cond_s = np.zeros((5, 2)), np.zeros((5, 2)), np.zeros((5, 2))
-    kept_fracs, cond_fracs = []
+    null_s, knn_s, ed_s, cond_s = np.zeros((5, 2)), np.zeros((5, 2)), np.zeros((5, 2)), np.zeros((5, 2))
+    ed_fracs, cond_fracs = [], []
+    tuning_results, best_params_used = None, None
+
     for rep, (fold_a, fold_b) in enumerate(splits):
         for fi, (tr_idx, te_idx) in enumerate([fold_a, fold_b]):
             tr_df, te_df = df.iloc[tr_idx].copy(), df.iloc[te_idx].copy()
             tr_df, te_df = min_max_normalize_train_test(tr_df, te_df, norm_cols)
-            tr_rows, te_rows = tr_df[cols].to_dict("records"), te_df[cols].to_dict("records")
+            tr_y, te_y = tr_df[target_col].to_numpy(dtype=float), te_df[target_col].to_numpy(dtype=float)
 
             null_pred = regression_null_model(tr_df[target_col])
-            null_s[rep, fi] = mean_squared_error([null_pred] * len(te_df), te_df[target_col].values)
+            null_s[rep, fi] = mean_squared_error(te_y, np.full(len(te_y), null_pred))
 
-            D_test = pairwise_fires(te_rows, tr_rows, cols, cyclical_cols, cycle_lengths, p=2)
-            knn_s[rep, fi] = mean_squared_error(
-                knn_regress(D_test, tr_df[target_col].values, best_k, best_gamma), te_df[target_col].values)
+            train_feats = makefeatures(tr_df, plain_cols, [], cyclical_cols, cyc_periods)
+            test_feats = makefeatures(te_df, plain_cols, [], cyclical_cols, cyc_periods)
 
-            epsilon = EPSILON_FRACTION * np.std(tr_df[target_col].values)
-            D_tt = pairwise_fires(tr_rows, tr_rows, cols, cyclical_cols, cycle_lengths, p=2)
-            keep = edited_nn_regression(D_tt, tr_df[target_col].values, epsilon=epsilon)
-            kept_fracs.append(keep.mean())
-            tr_rows_keep = [r for r, m in zip(tr_rows, keep) if m]
-            D_test_ed = pairwise_fires(te_rows, tr_rows_keep, cols, cyclical_cols, cycle_lengths, p=2)
-            ed_s[rep, fi] = mean_squared_error(
-                knn_regress(D_test_ed, tr_df[target_col].values[keep], best_k, best_gamma), te_df[target_col].values)
+            param_grid = {"k": list(k_grid), "p": list(p_grid), "gamma": list(gamma_grid)}
+            best_params, _, this_tuning = tune_hyperparameters(
+                knn_regressor_factory, train_feats, tr_y, param_grid,
+                metric=mean_squared_error, lower_is_better=True,
+                inner_k=inner_k, random_state=RANDOM_STATE)
+            if tuning_results is None:
+                tuning_results = this_tuning
+                best_params_used = best_params
 
-            cond_keep = condensed_nn_regression(D_tt, tr_y, epsilon=epsilon, random_state=0)
+            knn_model = KNNRegressor(k=best_params["k"], p=best_params["p"], gamma=best_params["gamma"])
+            knn_model.fit(train_feats, tr_y)
+            knn_s[rep, fi] = mean_squared_error(te_y, knn_model.predict(test_feats))
+
+            epsilon = EPSILON_FRACTION * np.std(tr_y)
+
+            ed_feats, ed_y, ed_keep = edited_nn_regression(
+                train_feats, tr_y, epsilon=epsilon, p=best_params["p"], gamma=best_params["gamma"], random_state=0)
+            ed_fracs.append(ed_keep.mean())
+            ed_model = KNNRegressor(k=best_params["k"], p=best_params["p"], gamma=best_params["gamma"])
+            ed_model.fit(ed_feats, ed_y)
+            ed_s[rep, fi] = mean_squared_error(te_y, ed_model.predict(test_feats))
+
+            cond_feats, cond_y, cond_keep = condensed_nn_regression(
+                train_feats, tr_y, epsilon=epsilon, p=best_params["p"], gamma=best_params["gamma"], random_state=0)
             cond_fracs.append(cond_keep.mean())
-            cond_s[rep, fi] = mean_squared_error(
-                knn_regress(D_test[:, cond_keep], tr_y[cond_keep], best_k, best_gamma), te_y)
+            cond_model = KNNRegressor(k=best_params["k"], p=best_params["p"], gamma=best_params["gamma"])
+            cond_model.fit(cond_feats, cond_y)
+            cond_s[rep, fi] = mean_squared_error(te_y, cond_model.predict(test_feats))
+
+    return _package_result(name, "regression", best_params_used, tuning_results,
+                            null_s, knn_s, ed_s, cond_s, ed_fracs, cond_fracs)
 
 
-    return _package_result(name, "regression", best_params, tuning_results, null_s, knn_s, ed_s, kept_fracs, cond_s, ed_fracs, cond_fracs)
-
-
-def _package_result(name, task, best_params, tuning_results, null_s, knn_s, ed_s, kept_fracs):
-    t1, p_null_knn, _ = dietterich_5x2cv_ttest(null_s, knn_s)
-    t2, p_knn_ed, _ = dietterich_5x2cv_ttest(knn_s, ed_s)
+def _package_result(name, task, best_params, tuning_results, null_s, knn_s, ed_s, cond_s, ed_fracs, cond_fracs):
+    _, p_null_knn, _ = dietterich_5x2cv_ttest(null_s, knn_s)
+    _, p_knn_ed, _ = dietterich_5x2cv_ttest(knn_s, ed_s)
+    _, p_ed_cond, _ = dietterich_5x2cv_ttest(ed_s, cond_s)
+    _, p_knn_cond, _ = dietterich_5x2cv_ttest(knn_s, cond_s)
     return {
         "name": name, "task": task, "best_params": best_params, "tuning_results": tuning_results,
-        "null_mean": float(null_s.mean()), "knn_mean": float(knn_s.mean()), "edited_mean": float(ed_s.mean()),
-        "kept_fraction": float(np.mean(kept_fracs)),
+        "null_mean": float(null_s.mean()), "knn_mean": float(knn_s.mean()),
+        "edited_mean": float(ed_s.mean()), "condensed_mean": float(cond_s.mean()),
+        "edited_kept_fraction": float(np.mean(ed_fracs)), "condensed_kept_fraction": float(np.mean(cond_fracs)),
         "p_null_vs_knn": p_null_knn, "p_knn_vs_edited": p_knn_ed,
+        "p_edited_vs_condensed": p_ed_cond, "p_knn_vs_condensed": p_knn_cond,
     }
 
 # Load the six data sets and run the analysis
@@ -349,8 +445,13 @@ for r in ALL_RESULTS:
                  "p_value_vs_previous": r["p_null_vs_knn"], "significant_at_0.05": r["p_null_vs_knn"] < 0.05})
     rows.append({"dataset": r["name"], "task": r["task"], "method": "Edited-KNN", "metric": metric,
                  "mean_score": r["edited_mean"], "hyperparams": str(r["best_params"]),
-                 "kept_fraction": r["kept_fraction"],
+                 "kept_fraction": r["edited_kept_fraction"],
                  "p_value_vs_previous": r["p_knn_vs_edited"], "significant_at_0.05": r["p_knn_vs_edited"] < 0.05})
+    rows.append({"dataset": r["name"], "task": r["task"], "method": "Condensed-KNN", "metric": metric,
+                 "mean_score": r["condensed_mean"], "hyperparams": str(r["best_params"]),
+                 "kept_fraction": r["condensed_kept_fraction"],
+                 "p_value_vs_previous": r["p_edited_vs_condensed"],
+                 "significant_at_0.05": r["p_edited_vs_condensed"] < 0.05})
 
 results_table = pd.DataFrame(rows)
 results_table.to_csv(os.path.join(OUT_DIR, "results_table.csv"), index=False)
@@ -360,7 +461,7 @@ print("RESULTS TABLE (also written to results_table.csv)")
 print("=" * 90)
 print(results_table.to_string(index=False))
 
-# 2a. Figure: validation error/MSE vs. k (all six datasets)
+# 2a. Figure: validation error/MSE vs. k
 
 fig, axes = plt.subplots(2, 3, figsize=(15, 8), facecolor=SURFACE)
 class_results = [res_cancer, res_car, res_vote]
@@ -397,14 +498,16 @@ plt.close(fig)
 
 # 2b. Figure: method comparison across all six datasets
 
-fig, ax = plt.subplots(figsize=(11, 6), facecolor=SURFACE)
+fig, ax = plt.subplots(figsize=(12, 6), facecolor=SURFACE)
 names = [r["name"] for r in ALL_RESULTS]
 knn_rel = [r["knn_mean"] / r["null_mean"] for r in ALL_RESULTS]
 ed_rel = [r["edited_mean"] / r["null_mean"] for r in ALL_RESULTS]
+cond_rel = [r["condensed_mean"] / r["null_mean"] for r in ALL_RESULTS]
 x = np.arange(len(names))
-width = 0.35
-ax.bar(x - width / 2, knn_rel, width, label="KNN", color=C_BLUE, zorder=3)
-ax.bar(x + width / 2, ed_rel, width, label="Edited-KNN", color=C_ORANGE, zorder=3)
+width = 0.26
+ax.bar(x - width, knn_rel, width, label="KNN", color=C_BLUE, zorder=3)
+ax.bar(x, ed_rel, width, label="Edited-KNN", color=C_ORANGE, zorder=3)
+ax.bar(x + width, cond_rel, width, label="Condensed-KNN", color=C_AQUA, zorder=3)
 ax.axhline(1.0, color=C_GRAY, linestyle="--", linewidth=1.2, zorder=2)
 ax.text(len(names) - 0.5, 1.02, "Null model baseline", color=INK2, fontsize=8, ha="right")
 ax.set_xticks(x)
@@ -416,26 +519,35 @@ fig.tight_layout()
 fig.savefig(os.path.join(OUT_DIR, "fig_method_comparison.png"), dpi=150, facecolor=SURFACE)
 plt.close(fig)
 
-# 2c. Figure: reduced dataset size vs. performance (Edited-KNN)
+# 2c. Figure: reduced dataset size vs. performance
 
-fig, ax = plt.subplots(figsize=(8, 6), facecolor=SURFACE)
-label_offsets = [(40, -25), (40, 0), (40, 25), (7, 5), (7, 5), (7, 5)]
-for r, offset in zip(ALL_RESULTS, label_offsets):
-    color = C_BLUE if r["task"] == "classification" else C_ORANGE
-    x_val = r["kept_fraction"] * 100
-    y_val = r["edited_mean"] / r["knn_mean"]
-    ax.scatter([x_val], [y_val], color=color, s=110, zorder=3, edgecolor=INK, linewidth=0.5)
-    ax.annotate(r["name"], (x_val, y_val), textcoords="offset points", xytext=offset,
-                fontsize=8, color=INK2)
-ax.set_xlim(ax.get_xlim()[0], ax.get_xlim()[1] + 10)
+DATASET_COLORS = {
+    "Breast Cancer": C_BLUE, "Car Evaluation": C_ORANGE, "Congressional Vote": C_AQUA,
+    "Abalone": C_YELLOW, "Computer Hardware": C_MAGENTA, "Forest Fires": C_VIOLET,
+}
+fig, ax = plt.subplots(figsize=(9, 7), facecolor=SURFACE)
+for r in ALL_RESULTS:
+    color = DATASET_COLORS[r["name"]]
+    ax.scatter([r["edited_kept_fraction"] * 100], [r["edited_mean"] / r["knn_mean"]],
+               color=color, s=130, marker="o", edgecolor=INK, linewidth=0.6, zorder=3)
+    ax.scatter([r["condensed_kept_fraction"] * 100], [r["condensed_mean"] / r["knn_mean"]],
+               color=color, s=130, marker="^", edgecolor=INK, linewidth=0.6, zorder=3)
 ax.axhline(1.0, color=C_GRAY, linestyle="--", linewidth=1.2, zorder=2)
-ax.text(ax.get_xlim()[0], 1.02, "Same error as full KNN", color=INK2, fontsize=8, ha="left")
-style_axes(ax, title="Edited-KNN: reduced set size vs. performance",
-           xlabel="% of training points kept after editing",
-           ylabel="Edited-KNN score / full-KNN score")
-handles = [plt.Line2D([0], [0], marker="o", color="w", markerfacecolor=C_BLUE, markersize=9, label="Classification"),
-           plt.Line2D([0], [0], marker="o", color="w", markerfacecolor=C_ORANGE, markersize=9, label="Regression")]
-ax.legend(handles=handles, frameon=False, fontsize=9, labelcolor=INK2, loc="best")
+ax.text(55, 1.03, "Same error as full KNN", color=INK2, fontsize=8, ha="center")
+style_axes(ax, title="Reduced set size vs. performance (Edited-KNN vs. Condensed-KNN)",
+           xlabel="% of training points kept after reduction",
+           ylabel="reduced-set score / full-KNN score")
+dataset_handles = [plt.Line2D([0], [0], marker="s", color="w", markerfacecolor=c, markersize=9, label=name)
+                   for name, c in DATASET_COLORS.items()]
+method_handles = [plt.Line2D([0], [0], marker="o", color="w", markerfacecolor=C_GRAY, markersize=9, label="Edited-KNN"),
+                  plt.Line2D([0], [0], marker="^", color="w", markerfacecolor=C_GRAY, markersize=9, label="Condensed-KNN")]
+leg1 = ax.legend(handles=dataset_handles, loc="lower left", frameon=False, fontsize=8,
+                  labelcolor=INK2, title="Dataset", title_fontsize=8)
+leg1.get_title().set_color(INK2)
+ax.add_artist(leg1)
+leg2 = ax.legend(handles=method_handles, loc="upper right", frameon=False, fontsize=8,
+                  labelcolor=INK2, title="Method", title_fontsize=8)
+leg2.get_title().set_color(INK2)
 fig.tight_layout()
 fig.savefig(os.path.join(OUT_DIR, "fig_reduced_size_vs_performance.png"), dpi=150, facecolor=SURFACE)
 plt.close(fig)
@@ -445,11 +557,14 @@ plt.close(fig)
 print("\n" + "=" * 90)
 print("SIGNIFICANCE TESTS (Dietterich 5x2cv paired t-test)")
 print("=" * 90)
+def _fmt(p):
+    return "significant" if p < 0.05 else "NOT significant"
+
 for r in ALL_RESULTS:
-    sig1 = "significant" if r["p_null_vs_knn"] < 0.05 else "NOT significant"
-    sig2 = "significant" if r["p_knn_vs_edited"] < 0.05 else "NOT significant"
-    print(f"{r['name']:20s} Null vs KNN:        p={r['p_null_vs_knn']:.4f} ({sig1})")
-    print(f"{'':20s} KNN vs Edited-KNN:  p={r['p_knn_vs_edited']:.4f} ({sig2})")
+    print(f"{r['name']:20s} Null vs KNN:            p={r['p_null_vs_knn']:.4f} ({_fmt(r['p_null_vs_knn'])})")
+    print(f"{'':20s} KNN vs Edited-KNN:      p={r['p_knn_vs_edited']:.4f} ({_fmt(r['p_knn_vs_edited'])})")
+    print(f"{'':20s} KNN vs Condensed-KNN:   p={r['p_knn_vs_condensed']:.4f} ({_fmt(r['p_knn_vs_condensed'])})")
+    print(f"{'':20s} Edited vs Condensed-KNN: p={r['p_edited_vs_condensed']:.4f} ({_fmt(r['p_edited_vs_condensed'])})")
 
 print("\nDone. Wrote results_table.csv, fig_hyperparameter_tuning.png, "
       "fig_method_comparison.png, fig_reduced_size_vs_performance.png")
