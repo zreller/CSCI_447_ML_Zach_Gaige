@@ -240,6 +240,86 @@ def edited_nn_regression(D_full, y, epsilon, max_iters=50, min_remaining=5):
 
     return keep
 
+
+def condensed_nn_classification(D_full, y, max_iters=50, random_state=None):
+    rng = np.random.default_rng(random_state)
+    y = np.asarray(y)
+    n = len(y)
+    order = rng.permutation(n)
+
+    z_idx = [int(order[0])]
+    in_z = np.zeros(n, dtype=bool)
+    in_z[z_idx[0]] = True
+
+    for _ in range(max_iters):
+        z_arr = np.array(z_idx)
+        sub_D = D_full[:, z_arr]                    # (n, |Z|) -- distance from every point to Z
+        nearest_local = np.argmin(sub_D, axis=1)
+        nn_dist = sub_D[np.arange(n), nearest_local]
+        nn_label = y[z_arr][nearest_local]
+
+        added_this_pass = False
+        for i in order:
+            i = int(i)
+            if in_z[i]:
+                continue
+            if nn_label[i] != y[i]:
+                z_idx.append(i)
+                in_z[i] = True
+                added_this_pass = True
+                # Only the newly added point's column changes anything --
+                # update the running "nearest in Z" info with just that,
+                # instead of recomputing sub_D from scratch.
+                new_d = D_full[:, i]
+                better = new_d < nn_dist
+                nn_dist = np.where(better, new_d, nn_dist)
+                nn_label = np.where(better, y[i], nn_label)
+        if not added_this_pass:
+            break
+
+    keep = np.zeros(n, dtype=bool)
+    keep[np.array(z_idx)] = True
+    return keep
+
+
+def condensed_nn_regression(D_full, y, epsilon, max_iters=50, random_state=None):
+    rng = np.random.default_rng(random_state)
+    y = np.asarray(y, dtype=float)
+    n = len(y)
+    order = rng.permutation(n)
+
+    z_idx = [int(order[0])]
+    in_z = np.zeros(n, dtype=bool)
+    in_z[z_idx[0]] = True
+
+    for _ in range(max_iters):
+        z_arr = np.array(z_idx)
+        sub_D = D_full[:, z_arr]
+        nearest_local = np.argmin(sub_D, axis=1)
+        nn_dist = sub_D[np.arange(n), nearest_local]
+        nn_value = y[z_arr][nearest_local]
+
+        added_this_pass = False
+        for i in order:
+            i = int(i)
+            if in_z[i]:
+                continue
+            if abs(nn_value[i] - y[i]) > epsilon:
+                z_idx.append(i)
+                in_z[i] = True
+                added_this_pass = True
+                new_d = D_full[:, i]
+                better = new_d < nn_dist
+                nn_dist = np.where(better, new_d, nn_dist)
+                nn_value = np.where(better, y[i], nn_value)
+        if not added_this_pass:
+            break
+
+    keep = np.zeros(n, dtype=bool)
+    keep[np.array(z_idx)] = True
+    return keep
+
+
 # Hyperparameter tuning + 5x2cv significance testing
 
 def k_fold_split(n, k, random_state=None):

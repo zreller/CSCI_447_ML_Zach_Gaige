@@ -101,7 +101,7 @@ def run_numeric_classification(name, df, feature_cols, class_col, k_grid, inner_
 
     splits = five_by_two_split(n, random_state=RANDOM_STATE)
     null_s, knn_s, ed_s = np.zeros((5, 2)), np.zeros((5, 2)), np.zeros((5, 2))
-    kept_fracs = []
+    kept_fracs, cond_fracs = []
     for rep, (fold_a, fold_b) in enumerate(splits):
         for fi, (tr_idx, te_idx) in enumerate([fold_a, fold_b]):
             tr_df, te_df = df.iloc[tr_idx].copy(), df.iloc[te_idx].copy()
@@ -119,10 +119,15 @@ def run_numeric_classification(name, df, feature_cols, class_col, k_grid, inner_
             kept_fracs.append(keep.mean())
             D_test_ed = pairwise_numeric(te_df[feature_cols].values, tr_df[feature_cols].values[keep], p=2)
             ed_s[rep, fi] = classification_error(
-                knn_classify(D_test_ed, tr_df[class_col].values[keep], best_k), te_df[class_col].values)
 
+            cond_keep = condensed_nn_classification(D_tt, tr_y, random_state=0)
+            cond_fracs.append(cond_keep.mean())
+            cond_s[rep, fi] = classification_error(
+                knn_classify(D_test[:, cond_keep], tr_y[cond_keep], best_k), te_y)
+            
     return _package_result(name, "classification", {"k": best_k}, tuning_results,
-                            null_s, knn_s, ed_s, kept_fracs)
+                            null_s, knn_s, ed_s, kept_fracs, ed
+                          -s, cond_s, ed_fracs. cond_fracs)
 
 
 def run_categorical_classification(name, df, cat_cols, class_col, k_grid, inner_k=5):
@@ -132,8 +137,8 @@ def run_categorical_classification(name, df, cat_cols, class_col, k_grid, inner_
         df.iloc[:split_idx], cat_cols, class_col, k_grid, p=1, inner_k=inner_k, random_state=RANDOM_STATE)
 
     splits = five_by_two_split(n, random_state=RANDOM_STATE)
-    null_s, knn_s, ed_s = np.zeros((5, 2)), np.zeros((5, 2)), np.zeros((5, 2))
-    kept_fracs = []
+    null_s, knn_s, ed_s, cond_s = np.zeros((5, 2)), np.zeros((5, 2)), np.zeros((5, 2))
+    kept_fracs, cond_fracs = []
     for rep, (fold_a, fold_b) in enumerate(splits):
         for fi, (tr_idx, te_idx) in enumerate([fold_a, fold_b]):
             tr_df, te_df = df.iloc[tr_idx], df.iloc[te_idx]
@@ -154,10 +159,14 @@ def run_categorical_classification(name, df, cat_cols, class_col, k_grid, inner_
             X_tr_keep = [x for x, m in zip(X_tr, keep) if m]
             D_test_ed = pairwise_categorical(X_te, X_tr_keep, vdm_tables, classes, p=1)
             ed_s[rep, fi] = classification_error(
-                knn_classify(D_test_ed, tr_df[class_col].values[keep], best_k), te_df[class_col].values)
+
+            cond_keep = condensed_nn_classification(D_tt, tr_y, random_state=0)
+            cond_fracs.append(cond_keep.mean())
+            cond_s[rep, fi] = classification_error(
+                knn_classify(D_test[:, cond_keep], tr_y[cond_keep], best_k), te_y)
 
     return _package_result(name, "classification", {"k": best_k}, tuning_results,
-                            null_s, knn_s, ed_s, kept_fracs)
+                            null_s, knn_s, ed_s, kept_fracs, cond_s,ed_fracs, cond_fracs)
 
 
 def run_numeric_regression(name, df, feature_cols, target_col, k_grid, gamma_grid, inner_k=5):
@@ -169,8 +178,8 @@ def run_numeric_regression(name, df, feature_cols, target_col, k_grid, gamma_gri
     best_k, best_gamma = best_params["k"], best_params["gamma"]
 
     splits = five_by_two_split(n, random_state=RANDOM_STATE)
-    null_s, knn_s, ed_s = np.zeros((5, 2)), np.zeros((5, 2)), np.zeros((5, 2))
-    kept_fracs = []
+    null_s, knn_s, ed_s, cond_s = np.zeros((5, 2)), np.zeros((5, 2)), np.zeros((5, 2))
+    kept_fracs, cond_fracs = []
     for rep, (fold_a, fold_b) in enumerate(splits):
         for fi, (tr_idx, te_idx) in enumerate([fold_a, fold_b]):
             tr_df, te_df = df.iloc[tr_idx].copy(), df.iloc[te_idx].copy()
@@ -189,9 +198,14 @@ def run_numeric_regression(name, df, feature_cols, target_col, k_grid, gamma_gri
             kept_fracs.append(keep.mean())
             D_test_ed = pairwise_numeric(te_df[feature_cols].values, tr_df[feature_cols].values[keep], p=2)
             ed_s[rep, fi] = mean_squared_error(
+
+            
+            cond_keep = condensed_nn_regression(D_tt, tr_y, epsilon=epsilon, random_state=0)
+            cond_fracs.append(cond_keep.mean())
+            cond_s[rep, fi] = mean_squared_error(
                 knn_regress(D_test_ed, tr_df[target_col].values[keep], best_k, best_gamma), te_df[target_col].values)
 
-    return _package_result(name, "regression", best_params, tuning_results, null_s, knn_s, ed_s, kept_fracs)
+    return _package_result(name, "regression", best_params, tuning_results, null_s, knn_s, ed_s, kept_fracs, cond_s, ed_fracs, cond_fracs)
 
 
 def run_fires_regression(name, df, cols, cyclical_cols, cycle_lengths, norm_cols, target_col,
@@ -204,8 +218,8 @@ def run_fires_regression(name, df, cols, cyclical_cols, cycle_lengths, norm_cols
     best_k, best_gamma = best_params["k"], best_params["gamma"]
 
     splits = five_by_two_split(n, random_state=RANDOM_STATE)
-    null_s, knn_s, ed_s = np.zeros((5, 2)), np.zeros((5, 2)), np.zeros((5, 2))
-    kept_fracs = []
+    null_s, knn_s, ed_s, cond_s = np.zeros((5, 2)), np.zeros((5, 2)), np.zeros((5, 2))
+    kept_fracs, cond_fracs = []
     for rep, (fold_a, fold_b) in enumerate(splits):
         for fi, (tr_idx, te_idx) in enumerate([fold_a, fold_b]):
             tr_df, te_df = df.iloc[tr_idx].copy(), df.iloc[te_idx].copy()
@@ -228,7 +242,13 @@ def run_fires_regression(name, df, cols, cyclical_cols, cycle_lengths, norm_cols
             ed_s[rep, fi] = mean_squared_error(
                 knn_regress(D_test_ed, tr_df[target_col].values[keep], best_k, best_gamma), te_df[target_col].values)
 
-    return _package_result(name, "regression", best_params, tuning_results, null_s, knn_s, ed_s, kept_fracs)
+            cond_keep = condensed_nn_regression(D_tt, tr_y, epsilon=epsilon, random_state=0)
+            cond_fracs.append(cond_keep.mean())
+            cond_s[rep, fi] = mean_squared_error(
+                knn_regress(D_test[:, cond_keep], tr_y[cond_keep], best_k, best_gamma), te_y)
+
+
+    return _package_result(name, "regression", best_params, tuning_results, null_s, knn_s, ed_s, kept_fracs, cond_s, ed_fracs, cond_fracs)
 
 
 def _package_result(name, task, best_params, tuning_results, null_s, knn_s, ed_s, kept_fracs):
