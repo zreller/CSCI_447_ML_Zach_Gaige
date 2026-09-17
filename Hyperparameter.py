@@ -5,8 +5,8 @@ from typing import Callable, Sequence
 import itertools
 import numpy as np
 
-from .preprocessing import k_fold_indices
-from .knn import Features
+from preprocessing import k_fold_indices
+from knn import Features
 
 
 def classification_error(y_true, y_pred) -> float:

@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import numpy as np
 
-from . import distances as dist_mod
+import distances as dist_mod
 
 CHUNK_SIZE = 300
 

@@ -250,7 +250,7 @@ print("Running Breast Cancer...")
 cancer_cols = ["id", "clump_thickness", "cell_size_uniformity", "cell_shape_uniformity",
                "marginal_adhesion", "single_epithelial_cell_size", "bare_nuclei",
                "bland_chromatin", "normal_nucleoli", "mitoses", "class"]
-cancer = pd.read_csv("breast-cancer.data", header=None, names=cancer_cols)
+cancer = pd.read_csv("breast-cancer-wisconsin.data", header=None, names=cancer_cols)
 cancer = cancer.drop(columns=["id"])
 cancer = cancer[cancer["bare_nuclei"] != "?"]
 cancer["bare_nuclei"] = cancer["bare_nuclei"].astype(int)

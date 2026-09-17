@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from .knn import Features, KNNClassifier, KNNRegressor, CHUNK_SIZE
-from . import distances as dist_mod
+from knn import Features, KNNClassifier, KNNRegressor, CHUNK_SIZE
+import distances as dist_mod
 
 
 def _predict_loo_classification(feats: Features, y: np.ndarray, p, random_state=None) -> np.ndarray:

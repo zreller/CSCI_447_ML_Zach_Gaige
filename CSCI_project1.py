@@ -145,7 +145,7 @@ def run_knn_classification_tuned(train_df, test_df, target_col, numeric_cols, ca
     final_model = KNNClassifier(k=best_params['k'], p=best_params['p'])
     final_model.fit(train_feats, y_train)
     y_pred = final_model.predict(test_feats)
-    return y_pred
+    return y_pred, best_params
 
 def run_knn_regression_tuned(train_df, test_df, target_col, numeric_cols, categorical_cols = None, cyclical_cols=None, cyc_periods=None, k_values=[1, 3, 5], p_values=[1, 2], gamma_grid = [0.1, 1.0, 10.0], vdm_tables = None, classes = None):
 
@@ -159,7 +159,7 @@ def run_knn_regression_tuned(train_df, test_df, target_col, numeric_cols, catego
     final_model = KNNRegressor(**best_params)
     final_model.fit(train_feats, y_train)
     y_pred = final_model.predict(test_feats)
-    return y_pred
+    return y_pred, best_params
 
 def run_edited_classification_tuned(train_df, test_df, target_col, numeric_cols, categorical_cols,
                                      cyclical_cols=None, cyc_periods=None,
@@ -179,7 +179,9 @@ def run_edited_classification_tuned(train_df, test_df, target_col, numeric_cols,
     test_feats = makefeatures(test_df, numeric_cols, categorical_cols, cyclical_cols, cyc_periods)
     final_model = KNNClassifier(k=best_params['k'], p=best_params['p'])
     final_model.fit(reduced_feats, reduced_y)
-    return final_model.predict(test_feats)
+    predictions = final_model.predict(test_feats)
+    return predictions, best_params
+    
 
 def run_condensed_regression_tuned(train_df, test_df, target_col, numeric_cols, categorical_cols=None,
                                     cyclical_cols=None, cyc_periods=None,
@@ -202,7 +204,8 @@ def run_condensed_regression_tuned(train_df, test_df, target_col, numeric_cols, 
     test_feats = makefeatures(test_df, numeric_cols, categorical_cols, cyclical_cols, cyc_periods)
     final_model = KNNRegressor(k=best_params['k'], p=best_params['p'], gamma=best_params['gamma'])
     final_model.fit(reduced_feats, reduced_y)
-    return final_model.predict(test_feats)
+    predictions = final_model.predict(test_feats)
+    return predictions, best_params
 
 def run_condensed_classification_tuned(train_df, test_df, target_col, numeric_cols, categorical_cols,
                                         cyclical_cols=None, cyc_periods=None,
@@ -222,7 +225,8 @@ def run_condensed_classification_tuned(train_df, test_df, target_col, numeric_co
     test_feats = makefeatures(test_df, numeric_cols, categorical_cols, cyclical_cols, cyc_periods)
     final_model = KNNClassifier(k=best_params['k'], p=best_params['p'])
     final_model.fit(reduced_feats, reduced_y)
-    return final_model.predict(test_feats)
+    predictions = final_model.predict(test_feats)
+    return predictions, best_params
 
 def run_edited_regression_tuned(train_df, test_df, target_col, numeric_cols, categorical_cols=None,
                                  cyclical_cols=None, cyc_periods=None,
@@ -245,7 +249,8 @@ def run_edited_regression_tuned(train_df, test_df, target_col, numeric_cols, cat
     test_feats = makefeatures(test_df, numeric_cols, categorical_cols, cyclical_cols, cyc_periods)
     final_model = KNNRegressor(k=best_params['k'], p=best_params['p'], gamma=best_params['gamma'])
     final_model.fit(reduced_feats, reduced_y)
-    return final_model.predict(test_feats)
+    predictions = final_model.predict(test_feats)
+    return predictions, best_params
 
 
 def knn_classifier_factory(k, p):
@@ -298,6 +303,7 @@ def condensed_regressor_factory(k, p, gamma, epsilon):
 def run_cv_for_dataset(df, target_col, numeric_cols, categorical_cols, methods, is_classification, repeats=5, cyclical_cols=None, cyc_periods=None):
     splits = five_by_two_split(df, repeats=5, random_state=42)
     results = {name: [] for name in methods}
+    best_params_results = {name: [] for name in methods}
 
     for fold_A, fold_B in splits:
         for train_df, test_df in [fold_A, fold_B]:
@@ -316,8 +322,21 @@ def run_cv_for_dataset(df, target_col, numeric_cols, categorical_cols, methods, 
             y_test = test_df[target_col]
 
             for name, method_fn in methods.items():
-                # Bug 3 fix: pass vdm_tables/classes through so cat_dist-based methods can use them
-                y_pred = method_fn(train_df, test_df, target_col, numeric_cols, categorical_cols)
+
+                result = method_fn(
+                    train_df,
+                    test_df,
+                    target_col,
+                    numeric_cols,
+                    categorical_cols
+                )
+
+                # Tuned methods return (predictions, best_params)
+                if isinstance(result, tuple):
+                    y_pred, best_params = result
+                    best_params_results[name].append(best_params)
+                else:
+                    y_pred = result
 
                 if is_classification:
                     score = classification_error(y_test, y_pred)
@@ -326,7 +345,7 @@ def run_cv_for_dataset(df, target_col, numeric_cols, categorical_cols, methods, 
 
                 results[name].append(score)
 
-    return results
+    return results, best_params_results
 
 def run_null_regression(train_df, test_df, target_col, vdm_tables=None, classes=None):
     pred_value = regression_null_model(train_df[target_col])
@@ -395,7 +414,8 @@ def run_condensed_classification(train_df, test_df, target_col, numeric_cols, ca
     y_train = train_df[target_col].to_numpy()
 
     reduced_feats, reduced_y, keep = condensed_nn_classification(train_feats, y_train, p=p, max_iters=max_iters, random_state=random_state)
-   
+    print("Condensed size:", len(reduced_y), " Classes present:", set(reduced_y))  # add this
+
     knn=KNNClassifier(k=k, p=p, random_state=random_state)
     knn.fit(reduced_feats, reduced_y)
 
@@ -430,7 +450,7 @@ machine = machine.drop(columns = ['vendor_name', 'model_name', 'erp'])
 
 abalone_cols= ['sex', 'length', 'diameter', 'height', 'whole_weight', 'shucked_weight', 'viscera_weight', 'shell_weight', 'rings']
 abalone = pd.read_csv("abalone.data", header=None, names=abalone_cols)
-abalone = pd.get_dummies(abalone, columns=['sex'], dtype = int)
+abalone = pd.get_dummies(abalone, columns=['sex'], dtype=int)
 print("abalone data set")
 print(abalone.head(10))
 abalone_cols_norm = ['length', 'diameter', 'height', 'whole_weight', 'shucked_weight', 'viscera_weight', 'shell_weight']
@@ -522,40 +542,47 @@ methods_regression = {
     'knn regression': lambda train, test, target, numeric_cols, categorical_cols, cyclical_cols=None, cycle_lengths=None: run_knn_regression(
         train, test, target, numeric_cols = numeric_cols, categorical_cols = categorical_cols, k=5, gamma=1.0, p=2
     ),
-    'knn regression (tuned)': lambda train, test, target, numeric_cols, categorical_cols,  cyclical_cols=None, cycle_lengths=None: run_knn_regression_tuned(
-            train, test, target, numeric_cols, categorical_cols, k_values= (1,3,5,7,9), p_values=(2,), gamma_grid= (0.1, 1,10)  # start small, expand later
+    'knn regression (tuned)': lambda train, test, target, numeric_cols, categorical_cols, **kw: run_knn_regression_tuned(
+            train, test, target, numeric_cols, categorical_cols,
+            k_values=(3, 5, 7), p_values=(1,2), gamma_grid=(1.0,)  # start small, expand later
         ),
     'edited regression': lambda train, test, target, numeric_cols, categorical_cols, cyclical_cols=None, cycle_lengths=None, random_state=None: run_edited_regression(
         train, test, target, numeric_cols = numeric_cols, categorical_cols = categorical_cols, epsilon=50, k=5, p=2, max_iters=50, random_state=random_state
     ),
     'edited regression (tuned)': lambda train, test, target, numeric_cols, categorical_cols, **kw: run_edited_regression_tuned(
         train, test, target, numeric_cols, categorical_cols,
-        k_grid=(1, 3, 5, 7,9),p_grid=(2,), gamma_grid=(1.0,1,10), epsilon_grid=(10, 50, 100)   # start small, expand later
+        k_grid=(3, 5, 7), gamma_grid=(1.0,), epsilon_grid=(25, 50, 100)   # start small, expand later
     ),
     'condensed regression': lambda train, test, target, numeric_cols, categorical_cols, cyclical_cols=None, cycle_lengths=None, random_state=None: run_condensed_regression(
         train, test, target, numeric_cols = numeric_cols, categorical_cols = categorical_cols, epsilon=50, k=5, p=2, gamma=1.0, max_iters=50, random_state=random_state
     ),
-    'condensed regression (tuned)': lambda train, test, target, numeric_cols, categorical_cols, cyclical_cols=None, cycle_lengths=None, random_state=None: run_condensed_regression_tuned(
-            train, test, target, numeric_cols = numeric_cols, categorical_cols = categorical_cols, k_grid= (1,3,5,7,9), p_grid = (2,), gamma_grid=(0.1,1,10), epsilon_grid = (10, 50, 100)
-        ),
+    'condensed regression (tuned)': lambda train, test, target, numeric_cols, categorical_cols, **kw: run_condensed_regression_tuned(
+    train, test, target,
+    numeric_cols,
+    categorical_cols,
+    k_grid=(3, 5, 7),
+    p_grid=(1, 2),
+    gamma_grid=(1.0,),
+    epsilon_grid=(25, 50, 100)
+),
+
 }
 methods_classification = {
     'null classification': run_null_classification,
     'knn classification': lambda train, test, target, numeric_cols, categorical_cols, cyclical_cols=None, cycle_lengths=None: run_knn_classification(
         train, test, target, numeric_cols=numeric_cols, categorical_cols=categorical_cols, k=5, p=1
     ),
-    'knn classification (tuned)': lambda train, test, target, numeric_cols, categorical_cols, cyclical_cols=None, cycle_lengths=None: run_knn_classification_tuned(
-        train, test, target, numeric_cols, categorical_cols,
-        k_values=(1, 3, 5, 7, 9), p_values=(1, 2)
-    ),
     
     'edited classification': lambda train, test, target, numeric_cols, categorical_cols, cyclical_cols=None, cycle_lengths=None, random_state=None: run_edited_classification(
         train, test, target, numeric_cols = numeric_cols, categorical_cols = categorical_cols, epsilon=0.1, k=5, p=2, max_iters=50, random_state=random_state
     ),
-    'edited classification (tuned)': lambda train, test, target, numeric_cols, categorical_cols, cyclical_cols=None, cycle_lengths=None: run_edited_classification_tuned(
-        train, test, target, numeric_cols, categorical_cols,
-        k_grid=(1, 3, 5, 7, 9), p_grid=(1, 2)
-    ),
+    'edited classification (tuned)': lambda train, test, target, numeric_cols, categorical_cols, cyclical_cols=None, cycle_lengths=None, random_state=None: run_edited_classification_tuned(
+    train, test, target,
+    numeric_cols=numeric_cols,
+    categorical_cols=categorical_cols,
+    k_grid=(1, 3, 5, 7, 9),
+    p_grid=(1, 2)
+),
     'condensed classification': lambda train, test, target, numeric_cols, categorical_cols, cyclical_cols=None, cycle_lengths=None, random_state=None: run_condensed_classification(
         train, test, target, numeric_cols = numeric_cols, categorical_cols = categorical_cols, k=5, p=2, max_iters=50, random_state=42
     ),
@@ -565,21 +592,187 @@ methods_classification = {
         ),
 }
 
-t0 = time.time()
-print("Machine\n")
-results_regression_machine = run_cv_for_dataset(machine, 'prp', machine_numeric_cols, [], methods_regression,
+classification_hyperparams = {
+    'null classification': 'None',
+
+    'knn classification': {
+        'k': 5,
+        'p': 1
+    },
+
+    'edited classification': {
+        'epsilon': 0.1,
+        'k': 5,
+        'p': 2,
+        'max_iters': 50
+    },
+
+    'condensed classification': {
+        'k': 5,
+        'p': 2,
+        'max_iters': 50,
+        'random_state': 42
+    },
+
+    'condensed classification (tuned)': {
+        'k_grid': (3, 5, 7),
+        'p_grid': (1, 2)
+    }
+}
+
+
+regression_hyperparams = {
+    'null regression': 'None',
+
+    'knn regression': {
+        'k': 5,
+        'gamma': 1.0,
+        'p': 2
+    },
+
+    'knn regression (tuned)': {
+        'k_values': (3, 5, 7),
+        'p_values': (1, 2),
+        'gamma_grid': (1.0,)
+    },
+
+    'edited regression': {
+        'epsilon': 50,
+        'k': 5,
+        'p': 2,
+        'max_iters': 50
+    },
+
+    'edited regression (tuned)': {
+        'k_grid': (3, 5, 7),
+        'gamma_grid': (1.0,),
+        'epsilon_grid': (25, 50, 100)
+    },
+
+    'condensed regression': {
+        'epsilon': 50,
+        'k': 5,
+        'p': 2,
+        'gamma': 1.0,
+        'max_iters': 50
+    }
+}
+
+
+"""results_regression = run_cv_for_dataset(machine, 'prp', machine_numeric_cols, [], methods_regression,
                               is_classification=False)
-print(results_regression_machine)
-print("\n Abalone \n")
-#results_regression_abalone = run_cv_for_dataset(abalone, 'rings', abalone_numeric_cols, [], methods_regression, is_classification=False)
-#print(results_regression_abalone)
-print("\n Fires \n")
-results_regression_fires = run_cv_for_dataset(fires, 'area', fires_numeric_cols, [], methods_regression, is_classification=False)
-print(results_regression_fires)
+print(results_regression)
+print("Null model average MSE:", np.mean(results_regression['null regression']))
+print("k-NN average MSE:", np.mean(results_regression['knn regression']))
 results_classification = run_cv_for_dataset(car, 'class', [], car_categorical_cols, methods_classification,
                               is_classification=True)
-print(results_classification)
-print(f"took {time.time() -t0:.1f} seconds")
+print(results_classification)"""
+
+def run_and_report(df, target_col, numeric_cols, categorical_cols, methods, is_classification, name,
+                   cyclical_cols=None, cycle_lengths=None):
+
+    print(f"\n{'='*70}\nRunning {name}\n{'='*70}")
+    t0 = time.time()
+
+    if cyclical_cols:
+        results, best_params_results = run_cv_for_dataset(
+            df, target_col, numeric_cols, categorical_cols, methods,
+            is_classification=is_classification,
+            cyclical_cols=cyclical_cols,
+            cyc_periods=cycle_lengths
+        )
+    else:
+        results, best_params_results = run_cv_for_dataset(
+            df, target_col, numeric_cols, categorical_cols, methods,
+            is_classification=is_classification
+        )
+
+    # Select the appropriate hyperparameter dictionary
+    hyperparams = (
+        classification_hyperparams
+        if is_classification
+        else regression_hyperparams
+    )
+
+    print(f"\n{name} results:")
+
+    for method_name, scores in results.items():
+
+        print(f"\n  {method_name}:")
+
+        # Print best parameters selected during each outer fold
+        if best_params_results[method_name]:
+            for fold_num, params in enumerate(best_params_results[method_name], start=1):
+                print(f"      Fold {fold_num}: ", end="")
+
+                if isinstance(params, dict):
+                    print(", ".join(f"{key}={value}" for key, value in params.items()))
+                else:
+                    print(params)
+
+        else:
+            print("      No tuned hyperparameters")
+
+        print(f"      avg = {np.mean(scores):.4f}   std = {np.std(scores):.4f}")
+
+    print(f"\n{name} took {time.time()-t0:.1f} seconds")
+
+    return results
+
+
+# ==================== Regression datasets ====================
+
+results_machine = run_and_report(
+    machine, 'prp', machine_numeric_cols, [], methods_regression,
+    is_classification=False, name="Computer Hardware"
+)
+
+results_abalone = run_and_report(
+    abalone, 'rings', abalone_numeric_cols, [], methods_regression,
+    is_classification=False, name="Abalone"
+)
+
+results_fires = run_and_report(
+    fires, 'area', fires_numeric_cols, [], methods_regression,
+    is_classification=False, name="Forest Fires",
+    cyclical_cols=cyclical_cols, cycle_lengths=cycle_lengths
+)
+
+
+# ==================== Classification datasets ====================
+
+results_car = run_and_report(
+    car, 'class', [], car_categorical_cols, methods_classification,
+    is_classification=True, name="Car Evaluation"
+)
+
+results_house = run_and_report(
+    house_df, 'party', [], house_categorical_cols, methods_classification,
+    is_classification=True, name="Congressional Vote"
+)
+
+results_cancer = run_and_report(
+    cancer, 'class', cancer_numeric_cols, [], methods_classification,
+    is_classification=True, name="Breast Cancer"
+)
+
+
+# ==================== Final summary ====================
+
+print(f"\n{'='*70}\nALL DATASETS COMPLETE\n{'='*70}")
+all_results = {
+    'Computer Hardware': results_machine,
+    'Abalone': results_abalone,
+    'Forest Fires': results_fires,
+    'Car Evaluation': results_car,
+    'Congressional Vote': results_house,
+    'Breast Cancer': results_cancer,
+}
+for dataset_name, res in all_results.items():
+    print(f"\n{dataset_name}:")
+    for method_name, scores in res.items():
+        print(f"  {method_name:35s} avg = {np.mean(scores):.4f}")
+
 #train_norm, test_norm = min_max_normalize_train_test(train_df, test_df, machine_numeric_cols)
 
 #print("Original training set size:", len(train_norm))
