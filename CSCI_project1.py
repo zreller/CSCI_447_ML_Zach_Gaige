@@ -147,7 +147,7 @@ def run_knn_classification_tuned(train_df, test_df, target_col, numeric_cols, ca
     y_pred = final_model.predict(test_feats)
     return y_pred, best_params
 
-def run_knn_regression_tuned(train_df, test_df, target_col, numeric_cols, categorical_cols = None, cyclical_cols=None, cyc_periods=None, k_values=[1, 3, 5], p_values=[1, 2], gamma_grid = [0.1, 1.0, 10.0], vdm_tables = None, classes = None):
+def run_knn_regression_tuned(train_df, test_df, target_col, numeric_cols, categorical_cols = None, cyclical_cols=None, cyc_periods=None, k_values=[1, 3, 5], p_values=[1, 2], gamma_grid = [1.0, 5, 10, 20], vdm_tables = None, classes = None):
 
     train_feats = makefeatures(train_df, numeric_cols, categorical_cols, cyclical_cols, cyc_periods)
     y_train = train_df[target_col].to_numpy()
@@ -185,8 +185,8 @@ def run_edited_classification_tuned(train_df, test_df, target_col, numeric_cols,
 
 def run_condensed_regression_tuned(train_df, test_df, target_col, numeric_cols, categorical_cols=None,
                                     cyclical_cols=None, cyc_periods=None,
-                                    k_grid=(1, 3, 5, 7, 9), p_grid=(2,), gamma_grid=(0.1, 1, 10),
-                                    epsilon_grid=(10, 50, 100),
+                                    k_grid=(1, 3, 5, 7, 9), p_grid=(2,), gamma_grid=(1, 5, 10, 20),
+                                    epsilon_grid=(25, 50, 100, 200),
                                     vdm_tables=None, classes=None):
     train_feats = makefeatures(train_df, numeric_cols, categorical_cols, cyclical_cols, cyc_periods)
     y_train = train_df[target_col].to_numpy(dtype=float)
@@ -230,8 +230,8 @@ def run_condensed_classification_tuned(train_df, test_df, target_col, numeric_co
 
 def run_edited_regression_tuned(train_df, test_df, target_col, numeric_cols, categorical_cols=None,
                                  cyclical_cols=None, cyc_periods=None,
-                                 k_grid=(1, 3, 5, 7, 9), p_grid=(2,), gamma_grid=(0.1, 1, 10),
-                                 epsilon_grid=(10, 50, 100),
+                                 k_grid=(1, 3, 5, 7, 9), p_grid=(2,), gamma_grid=(1, 5, 10, 20),
+                                 epsilon_grid=(25, 50, 100, 200),
                                  vdm_tables=None, classes=None):
     train_feats = makefeatures(train_df, numeric_cols, categorical_cols, cyclical_cols, cyc_periods)
     y_train = train_df[target_col].to_numpy(dtype=float)
@@ -544,14 +544,14 @@ methods_regression = {
     ),
     'knn regression (tuned)': lambda train, test, target, numeric_cols, categorical_cols, **kw: run_knn_regression_tuned(
             train, test, target, numeric_cols, categorical_cols,
-            k_values=(3, 5, 7), p_values=(1,2), gamma_grid=(1.0,)  # start small, expand later
+            k_values=(3, 5, 7), p_values=(1,2), gamma_grid=(1, 5, 10, 20)  # start small, expand later
         ),
     'edited regression': lambda train, test, target, numeric_cols, categorical_cols, cyclical_cols=None, cycle_lengths=None, random_state=None: run_edited_regression(
         train, test, target, numeric_cols = numeric_cols, categorical_cols = categorical_cols, epsilon=50, k=5, p=2, max_iters=50, random_state=random_state
     ),
     'edited regression (tuned)': lambda train, test, target, numeric_cols, categorical_cols, **kw: run_edited_regression_tuned(
         train, test, target, numeric_cols, categorical_cols,
-        k_grid=(3, 5, 7), gamma_grid=(1.0,), epsilon_grid=(25, 50, 100)   # start small, expand later
+        k_grid=(3, 5, 7), gamma_grid=(1, 5, 10, 20), epsilon_grid=(25, 50, 100, 200)   # start small, expand later
     ),
     'condensed regression': lambda train, test, target, numeric_cols, categorical_cols, cyclical_cols=None, cycle_lengths=None, random_state=None: run_condensed_regression(
         train, test, target, numeric_cols = numeric_cols, categorical_cols = categorical_cols, epsilon=50, k=5, p=2, gamma=1.0, max_iters=50, random_state=random_state
@@ -562,8 +562,8 @@ methods_regression = {
     categorical_cols,
     k_grid=(3, 5, 7),
     p_grid=(1, 2),
-    gamma_grid=(1.0,),
-    epsilon_grid=(25, 50, 100)
+    gamma_grid=(1, 5, 10, 20),
+    epsilon_grid=(25, 50, 100, 200)
 ),
 
 }
@@ -633,7 +633,7 @@ regression_hyperparams = {
     'knn regression (tuned)': {
         'k_values': (3, 5, 7),
         'p_values': (1, 2),
-        'gamma_grid': (1.0,)
+        'gamma_grid': (1, 5, 10, 20)
     },
 
     'edited regression': {
@@ -645,8 +645,8 @@ regression_hyperparams = {
 
     'edited regression (tuned)': {
         'k_grid': (3, 5, 7),
-        'gamma_grid': (1.0,),
-        'epsilon_grid': (25, 50, 100)
+        'gamma_grid': (1, 5, 10, 20),
+        'epsilon_grid': (25, 50, 100, 200)
     },
 
     'condensed regression': {
